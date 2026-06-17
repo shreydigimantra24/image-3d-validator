@@ -12,6 +12,10 @@ import cv2
 
 N_CLUSTERS = 5
 
+# KMeans on a downscaled image yields a near-identical palette. Resizing up
+# front avoids allocating a multi-million-pixel foreground array from 4K inputs.
+PALETTE_MAX_SIZE = 256
+
 
 def analyze_dominant_colors(
     source_image_path: str,
@@ -73,6 +77,15 @@ def _dominant_palette(image_path: str, n_clusters: int):
     img = cv2.imread(image_path, cv2.IMREAD_UNCHANGED)
     if img is None:
         return []
+
+    # Downscale BEFORE masking/pixel extraction so the huge foreground array is
+    # never allocated for high-resolution inputs.
+    h, w = img.shape[:2]
+    scale = PALETTE_MAX_SIZE / max(h, w)
+    if scale < 1.0:
+        img = cv2.resize(
+            img, (max(1, int(w * scale)), max(1, int(h * scale))), interpolation=cv2.INTER_AREA
+        )
 
     mask = _foreground_mask(img)
 

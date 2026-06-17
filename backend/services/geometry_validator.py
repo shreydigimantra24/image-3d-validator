@@ -13,6 +13,23 @@ import trimesh
 import cv2
 from scipy.spatial.distance import directed_hausdorff
 
+from services.mesh_cache import load_combined
+
+
+def _count_components(mesh: trimesh.Trimesh) -> int:
+    """
+    Count connected components via lightweight graph traversal over face
+    adjacency. Avoids `mesh.split()`, which instantiates a full Trimesh per
+    component and blows up RAM on noisy/high-poly meshes.
+    """
+    n_faces = len(mesh.faces)
+    if n_faces == 0:
+        return 0
+    components = trimesh.graph.connected_components(
+        mesh.face_adjacency, nodes=np.arange(n_faces)
+    )
+    return len(components)
+
 
 def validate_geometry(
     source_image_path: str,
@@ -49,22 +66,14 @@ def validate_geometry(
 
 def _mesh_integrity(glb_path: str) -> dict:
     """Analyze mesh topology and structure."""
-    scene = trimesh.load(glb_path, force="scene")
+    combined = load_combined(glb_path)
 
-    # Collect all meshes
-    meshes = []
-    for name, geom in scene.geometry.items():
-        if isinstance(geom, trimesh.Trimesh):
-            meshes.append(geom)
-
-    if not meshes:
+    if combined is None:
         return {"score": 0, "checks": {"error": "No valid meshes found"}}
-
-    combined = trimesh.util.concatenate(meshes)
 
     # Individual checks
     is_watertight = combined.is_watertight
-    num_components = len(combined.split(only_watertight=False))
+    num_components = _count_components(combined)
     has_floating = num_components > 1
 
     # Non-manifold edges

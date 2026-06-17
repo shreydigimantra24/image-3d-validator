@@ -14,6 +14,23 @@ import cv2
 from PIL import Image
 from skimage.metrics import structural_similarity as ssim
 
+from services.mesh_cache import load_scene
+
+# Cached LPIPS network. Instantiating lpips.LPIPS(net="alex") per call reloads
+# AlexNet weights and leaks CPU/VRAM (PyTorch's caching allocator does not
+# return GPU memory to the OS), exhausting VRAM in a few requests.
+_lpips_model = None
+
+
+def _get_lpips_model():
+    """Lazily build and cache the LPIPS network once per process."""
+    global _lpips_model
+    if _lpips_model is None:
+        import lpips
+
+        _lpips_model = lpips.LPIPS(net="alex")
+    return _lpips_model
+
 
 def validate_texture(
     source_image_path: str,
@@ -55,7 +72,7 @@ def validate_texture(
 
 def _texture_presence(glb_path: str) -> dict:
     """Check if the GLB has proper materials, textures, and UV mapping."""
-    scene = trimesh.load(glb_path, force="scene")
+    scene = load_scene(glb_path)
 
     has_material = False
     has_texture = False
@@ -147,9 +164,8 @@ def _compute_lpips(source_path: str, rendered_path: str) -> float:
     """
     try:
         import torch
-        import lpips
 
-        loss_fn = lpips.LPIPS(net="alex")
+        loss_fn = _get_lpips_model()
 
         img1 = _load_and_prepare(source_path)
         img2 = _load_and_prepare(rendered_path)

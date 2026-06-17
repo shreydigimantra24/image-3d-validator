@@ -11,6 +11,8 @@ import numpy as np
 import trimesh
 from PIL import Image
 
+from services.mesh_cache import load_scene
+
 
 # ──────────────── Public API ────────────────
 
@@ -50,7 +52,7 @@ def render_glb_from_pose(
     Returns:
         Path to the rendered PNG image.
     """
-    scene = trimesh.load(glb_path, force="scene")
+    scene = load_scene(glb_path)
     camera_pose = _camera_pose_for(scene, azimuth, elevation)
 
     try:
@@ -80,7 +82,7 @@ class PoseRenderer:
 
     def __init__(self, glb_path: str, resolution: tuple = (256, 256)):
         self.resolution = resolution
-        self.scene = trimesh.load(glb_path, force="scene")
+        self.scene = load_scene(glb_path)
         self._mode = None
         self._pyrender = None
         self._py_scene = None
@@ -277,8 +279,12 @@ def _render_with_pyrender(scene, output_dir, resolution, camera_pose, suffix) ->
     py_scene.add(camera, pose=camera_pose)
 
     renderer = pyrender.OffscreenRenderer(*resolution)
-    color, _ = renderer.render(py_scene, flags=pyrender.RenderFlags.RGBA)
-    renderer.delete()
+    try:
+        color, _ = renderer.render(py_scene, flags=pyrender.RenderFlags.RGBA)
+    finally:
+        # Guarantee the EGL/OpenGL context is released even if render() raises,
+        # otherwise the context is orphaned and leaks VRAM on headless servers.
+        renderer.delete()
 
     return _save_rgba(color, output_dir, suffix)
 

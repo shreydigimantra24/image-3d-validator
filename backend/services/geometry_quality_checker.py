@@ -16,6 +16,23 @@ high geometry score just because its silhouette lines up.
 import numpy as np
 import trimesh
 
+from services.mesh_cache import load_combined
+
+
+def _count_components(mesh: trimesh.Trimesh) -> int:
+    """
+    Count connected components via lightweight graph traversal over face
+    adjacency. Avoids `mesh.split()`, which instantiates a full Trimesh per
+    component and blows up RAM on noisy/high-poly meshes.
+    """
+    n_faces = len(mesh.faces)
+    if n_faces == 0:
+        return 0
+    components = trimesh.graph.connected_components(
+        mesh.face_adjacency, nodes=np.arange(n_faces)
+    )
+    return len(components)
+
 
 def check_geometry_quality(glb_path: str) -> dict:
     """
@@ -29,9 +46,8 @@ def check_geometry_quality(glb_path: str) -> dict:
           "is_watertight": bool
         }
     """
-    scene = trimesh.load(glb_path, force="scene")
-    meshes = [g for g in scene.geometry.values() if isinstance(g, trimesh.Trimesh)]
-    if not meshes:
+    combined = load_combined(glb_path)
+    if combined is None:
         return {
             "holes": -1,
             "non_manifold_edges": -1,
@@ -44,13 +60,11 @@ def check_geometry_quality(glb_path: str) -> dict:
             "error": "No valid meshes found",
         }
 
-    combined = trimesh.util.concatenate(meshes)
-
     return {
         "holes": _count_holes(combined),
         "non_manifold_edges": _count_non_manifold_edges(combined),
         "degenerate_faces": _count_degenerate_faces(combined),
-        "components": len(combined.split(only_watertight=False)),
+        "components": _count_components(combined),
         "normals_consistent": _normals_consistent(combined),
         "total_faces": int(len(combined.faces)),
         "total_vertices": int(len(combined.vertices)),

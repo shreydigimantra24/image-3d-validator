@@ -13,6 +13,8 @@ Checks:
 
 import trimesh
 
+from services.mesh_cache import load_scene
+
 
 def check_texture_presence(glb_path: str) -> dict:
     """
@@ -25,7 +27,7 @@ def check_texture_presence(glb_path: str) -> dict:
           "has_vertex_colors": bool
         }
     """
-    scene = trimesh.load(glb_path, force="scene")
+    scene = load_scene(glb_path)
 
     material_present = False
     uv_present = False

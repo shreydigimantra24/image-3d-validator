@@ -22,8 +22,11 @@ def generate_overlay(source_image_path: str, aligned_render_path: str, output_di
     src = _load_rgb(source_image_path)
     rnd = _load_rgb(aligned_render_path)
 
-    h, w = src.shape[:2]
-    rnd = cv2.resize(rnd, (w, h), interpolation=cv2.INTER_AREA)
+    # Build the overlay at the render's (small) resolution. Downscale the source
+    # to match instead of upscaling a 512px render to a 4K source — the overlay
+    # is only a small UI preview, so the high-res blend wastes RAM/CPU/disk.
+    rh, rw = rnd.shape[:2]
+    src = cv2.resize(src, (rw, rh), interpolation=cv2.INTER_AREA)
 
     overlay = cv2.addWeighted(src, 0.5, rnd, 0.5, 0.0)
 
