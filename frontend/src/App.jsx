@@ -36,6 +36,115 @@ function ScoreRing({ score, color, label, icon }) {
   );
 }
 
+function QualityChips({ quality }) {
+  if (!quality) return null;
+  const items = [
+    ['Holes', quality.holes],
+    ['Components', quality.components],
+    ['Degenerate', quality.degenerate_faces],
+    ['Non-manifold', quality.non_manifold_edges],
+    ['Watertight', quality.is_watertight ? 'yes' : 'no'],
+    ['Normals', quality.normals_consistent ? 'ok' : 'bad'],
+  ];
+  return (
+    <div className="chip-row">
+      {items.map(([label, val]) => (
+        <span className="metric-chip" key={label}>
+          {label}: <strong>{String(val)}</strong>
+        </span>
+      ))}
+    </div>
+  );
+}
+
+function PresenceChips({ presence }) {
+  if (!presence) return null;
+  const items = [
+    ['Material', presence.material_present],
+    ['Texture', presence.texture_present],
+    ['UVs', presence.uv_present],
+    ['Vertex colors', presence.has_vertex_colors],
+  ];
+  return (
+    <div className="chip-row">
+      {items.map(([label, ok]) => (
+        <span className={`metric-chip ${ok ? 'chip-ok' : 'chip-bad'}`} key={label}>
+          {ok ? '✓' : '✕'} {label}
+        </span>
+      ))}
+    </div>
+  );
+}
+
+function GateChips({ gating }) {
+  if (!gating || !gating.gated) return null;
+  return (
+    <div className="chip-row">
+      {gating.applied_gates.map((g, i) => (
+        <span className="metric-chip chip-gate" key={i}>⚠ {g}</span>
+      ))}
+    </div>
+  );
+}
+
+function DominantPalettes({ dominant }) {
+  if (!dominant || !dominant.source_palette) return null;
+  const swatches = (palette) => (
+    <div className="swatch-row">
+      {palette.map((c, i) => (
+        <span
+          key={i}
+          className="swatch"
+          title={`rgb(${c.rgb.join(',')}) · ${Math.round(c.weight * 100)}%`}
+          style={{ background: `rgb(${c.rgb.join(',')})`, flex: Math.max(c.weight, 0.05) }}
+        />
+      ))}
+    </div>
+  );
+  return (
+    <div className="palette-block">
+      <div className="palette-row">
+        <span className="palette-label">Source</span>
+        {swatches(dominant.source_palette)}
+      </div>
+      <div className="palette-row">
+        <span className="palette-label">Render</span>
+        {swatches(dominant.render_palette)}
+      </div>
+      <div className="palette-distance">
+        Dominant color distance (ΔE): <strong>{dominant.dominant_color_distance}</strong>
+      </div>
+    </div>
+  );
+}
+
+function PerformancePanel({ timings }) {
+  const order = ['alignment', 'geometry', 'texture', 'color', 'reasoning', 'evidence'];
+  const total = timings.total || order.reduce((s, k) => s + (timings[k] || 0), 0);
+  return (
+    <div className="perf-panel">
+      <div className="reason-card__header">
+        <span className="reason-card__icon">⏱️</span>
+        <span className="reason-card__title">Performance ({total}s total)</span>
+      </div>
+      <div className="perf-bars">
+        {order.filter((k) => timings[k] != null).map((k) => (
+          <div className="perf-row" key={k}>
+            <span className="perf-label">{k}</span>
+            <div className="perf-track">
+              <div
+                className="perf-fill"
+                style={{ width: `${Math.min(100, (timings[k] / (total || 1)) * 100)}%` }}
+              />
+            </div>
+            <span className="perf-value">{timings[k]}s</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function App() {
   // State
   const [imageFile, setImageFile] = useState(null);
@@ -389,17 +498,37 @@ function App() {
               </div>
             </div>
 
-            {/* Rendered GLB Preview */}
-            {renderedImageUrl && (
-              <div className="rendered-preview">
-                <div className="image-grid">
+            {/* ── Validation Evidence (Enhancement 2) ── */}
+            {validationResult.evidence && (
+              <div className="evidence-panel">
+                <div className="evidence-panel__header">
+                  <span className="reason-card__icon">🔍</span>
+                  <span className="reason-card__title">Validation Evidence</span>
+                  {validationResult.alignment && (
+                    <span className="alignment-badge">
+                      Pose az {validationResult.alignment.azimuth}° / el {validationResult.alignment.elevation}°
+                      {' · '}IoU {validationResult.alignment.iou}
+                      {' · '}conf {Math.round((validationResult.alignment.confidence || 0) * 100)}%
+                      {validationResult.alignment.fallback ? ' · ⚠ fallback' : ''}
+                    </span>
+                  )}
+                </div>
+                <div className="evidence-grid">
                   <div className="image-preview">
                     <div className="image-preview__label">Source (BG Removed)</div>
-                    <img src={bgRemovedUrl} alt="Source" />
+                    <img src={validationResult.evidence.source_url || bgRemovedUrl} alt="Source" />
                   </div>
                   <div className="image-preview">
-                    <div className="image-preview__label">Rendered from GLB</div>
-                    <img src={renderedImageUrl} alt="Rendered GLB" />
+                    <div className="image-preview__label">Aligned Render</div>
+                    <img src={validationResult.evidence.aligned_render_url || renderedImageUrl} alt="Aligned render" />
+                  </div>
+                  <div className="image-preview">
+                    <div className="image-preview__label">Overlay</div>
+                    {validationResult.evidence.overlay_url ? (
+                      <img src={validationResult.evidence.overlay_url} alt="Overlay comparison" />
+                    ) : (
+                      <div className="evidence-empty">Overlay unavailable</div>
+                    )}
                   </div>
                 </div>
               </div>
@@ -432,6 +561,8 @@ function App() {
                   <span className="reason-card__title">Geometry Analysis</span>
                 </div>
                 <p className="reason-card__text">{validationResult.geometry.reason}</p>
+                <QualityChips quality={validationResult.geometry.details?.quality_checks} />
+                <GateChips gating={validationResult.geometry.details?.gating} />
               </div>
 
               <div className="reason-card">
@@ -440,6 +571,8 @@ function App() {
                   <span className="reason-card__title">Texture Analysis</span>
                 </div>
                 <p className="reason-card__text">{validationResult.texture.reason}</p>
+                <PresenceChips presence={validationResult.texture.details?.presence_checks} />
+                <GateChips gating={validationResult.texture.details?.gating} />
               </div>
 
               <div className="reason-card">
@@ -448,8 +581,14 @@ function App() {
                   <span className="reason-card__title">Color Analysis</span>
                 </div>
                 <p className="reason-card__text">{validationResult.color.reason}</p>
+                <DominantPalettes dominant={validationResult.color.details?.dominant_color} />
               </div>
             </div>
+
+            {/* ── Performance Monitoring (Enhancement 6) ── */}
+            {validationResult.performance && (
+              <PerformancePanel timings={validationResult.performance} />
+            )}
           </section>
         )}
 

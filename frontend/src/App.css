@@ -567,3 +567,181 @@
     gap: 12px;
   }
 }
+
+/* ────────────────── Validation Evidence (E2) ────────────────── */
+
+.evidence-panel {
+  margin-bottom: 28px;
+  padding: 20px;
+  border-radius: 14px;
+  background: var(--bg-glass);
+  border: 1px solid var(--border-color);
+}
+
+.evidence-panel__header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 16px;
+  flex-wrap: wrap;
+}
+
+.alignment-badge {
+  margin-left: auto;
+  font-size: 0.75rem;
+  font-weight: 600;
+  padding: 4px 12px;
+  border-radius: 20px;
+  background: rgba(99, 102, 241, 0.15);
+  color: var(--accent-secondary);
+  border: 1px solid var(--border-color);
+}
+
+.evidence-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 16px;
+}
+
+@media (max-width: 768px) {
+  .evidence-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.evidence-empty {
+  height: 200px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-muted);
+  font-size: 0.85rem;
+}
+
+/* ────────────────── Metric Chips (E3 / E4) ────────────────── */
+
+.chip-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 12px;
+}
+
+.metric-chip {
+  font-size: 0.72rem;
+  padding: 3px 10px;
+  border-radius: 14px;
+  background: var(--bg-glass);
+  border: 1px solid var(--border-color);
+  color: var(--text-muted);
+}
+
+.metric-chip strong {
+  color: var(--text-primary, #fff);
+}
+
+.metric-chip.chip-ok {
+  border-color: var(--accent-success);
+  color: var(--accent-success);
+}
+
+.metric-chip.chip-bad {
+  border-color: var(--accent-danger);
+  color: var(--accent-danger);
+}
+
+.metric-chip.chip-gate {
+  border-color: var(--accent-warning);
+  color: var(--accent-warning);
+  background: rgba(245, 158, 11, 0.1);
+}
+
+/* ────────────────── Dominant Color Palettes (E5) ────────────────── */
+
+.palette-block {
+  margin-top: 14px;
+}
+
+.palette-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 6px;
+}
+
+.palette-label {
+  width: 56px;
+  font-size: 0.72rem;
+  color: var(--text-muted);
+}
+
+.swatch-row {
+  display: flex;
+  flex: 1;
+  height: 22px;
+  border-radius: 6px;
+  overflow: hidden;
+  border: 1px solid var(--border-color);
+}
+
+.swatch {
+  height: 100%;
+}
+
+.palette-distance {
+  font-size: 0.78rem;
+  color: var(--text-muted);
+  margin-top: 6px;
+}
+
+/* ────────────────── Performance Panel (E6) ────────────────── */
+
+.perf-panel {
+  margin-top: 24px;
+  padding: 20px;
+  border-radius: 14px;
+  background: var(--bg-glass);
+  border: 1px solid var(--border-color);
+}
+
+.perf-bars {
+  margin-top: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.perf-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.perf-label {
+  width: 90px;
+  font-size: 0.78rem;
+  color: var(--text-muted);
+  text-transform: capitalize;
+}
+
+.perf-track {
+  flex: 1;
+  height: 8px;
+  border-radius: 4px;
+  background: var(--border-color);
+  overflow: hidden;
+}
+
+.perf-fill {
+  height: 100%;
+  border-radius: 4px;
+  background: linear-gradient(90deg, var(--accent-secondary), var(--accent-success));
+}
+
+.perf-value {
+  width: 56px;
+  text-align: right;
+  font-size: 0.78rem;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
