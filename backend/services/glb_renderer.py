@@ -64,6 +64,111 @@ def render_glb_from_pose(
             return _render_silhouette(combined, output_dir, resolution, azimuth, elevation, suffix)
 
 
+class PoseRenderer:
+    """
+    Reusable renderer for pose search. Loads the GLB once and reuses a single
+    pyrender scene + offscreen renderer across all candidate viewpoints,
+    returning silhouette masks in memory (no per-candidate file writes).
+
+    This is the memory-safe path for scanning dozens of poses: creating a fresh
+    renderer and reloading the mesh per candidate is what blows up RAM.
+
+    Use as a context manager:
+        with PoseRenderer(glb_path) as pr:
+            mask = pr.mask_at(azimuth, elevation)
+    """
+
+    def __init__(self, glb_path: str, resolution: tuple = (256, 256)):
+        self.resolution = resolution
+        self.scene = trimesh.load(glb_path, force="scene")
+        self._mode = None
+        self._pyrender = None
+        self._py_scene = None
+        self._cam_node = None
+        self._light_node = None
+        self._renderer = None
+        self._tri_scene = None
+        self._combined = None
+        self._setup()
+
+    def _setup(self):
+        # Preferred: a single reusable pyrender offscreen renderer.
+        try:
+            import pyrender
+
+            self._pyrender = pyrender
+            self._py_scene = pyrender.Scene.from_trimesh_scene(self.scene, bg_color=[0, 0, 0, 0])
+            self._cam_node = self._py_scene.add(pyrender.PerspectiveCamera(yfov=np.pi / 3.0))
+            self._light_node = self._py_scene.add(
+                pyrender.DirectionalLight(color=np.ones(3), intensity=3.0)
+            )
+            self._renderer = pyrender.OffscreenRenderer(*self.resolution)
+            self._mode = "pyrender"
+            return
+        except Exception:
+            self._teardown_pyrender()
+
+        # Fallback: analytic silhouette projection (pure numpy/cv2, no GL).
+        self._combined = trimesh.util.concatenate(_collect_meshes(self.scene))
+        self._mode = "silhouette"
+
+    def mask_at(self, azimuth: float, elevation: float) -> np.ndarray:
+        """Return a binary (0/255) silhouette mask at the given pose."""
+        if self._mode == "pyrender":
+            return self._mask_pyrender(azimuth, elevation)
+        return self._mask_silhouette(azimuth, elevation)
+
+    def _mask_pyrender(self, azimuth, elevation) -> np.ndarray:
+        pose = _camera_pose_for(self.scene, azimuth, elevation)
+        self._py_scene.set_pose(self._cam_node, pose)
+        self._py_scene.set_pose(self._light_node, pose)
+        color, _ = self._renderer.render(self._py_scene, flags=self._pyrender.RenderFlags.RGBA)
+        alpha = color[:, :, 3]
+        return (alpha > 16).astype(np.uint8) * 255
+
+    def _mask_silhouette(self, azimuth, elevation) -> np.ndarray:
+        import cv2
+
+        verts = self._combined.vertices - self._combined.vertices.mean(axis=0)
+        az = np.radians(-azimuth)
+        el = np.radians(-elevation)
+        ry = np.array([[np.cos(az), 0, np.sin(az)], [0, 1, 0], [-np.sin(az), 0, np.cos(az)]])
+        rx = np.array([[1, 0, 0], [0, np.cos(el), -np.sin(el)], [0, np.sin(el), np.cos(el)]])
+        verts = verts @ ry.T @ rx.T
+        m = np.abs(verts).max()
+        if m > 0:
+            verts = verts / m
+
+        w, h = self.resolution
+        scale = min(w, h) * 0.8 / 2
+        mask = np.zeros((h, w), dtype=np.uint8)
+        px = (verts[:, 0] * scale + w / 2).astype(np.int32)
+        py = (h / 2 - verts[:, 1] * scale).astype(np.int32)
+        for face in self._combined.faces:
+            tri = np.stack([px[face], py[face]], axis=1)
+            cv2.fillConvexPoly(mask, tri, 255)
+        return mask
+
+    def _teardown_pyrender(self):
+        try:
+            if self._renderer is not None:
+                self._renderer.delete()
+        except Exception:
+            pass
+        self._renderer = None
+        self._py_scene = None
+
+    def close(self):
+        self._teardown_pyrender()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
+        return False
+
+
 def extract_silhouette_mask(image_path: str, size: tuple = (256, 256)) -> np.ndarray:
     """
     Extract a binary foreground silhouette mask (0/255) from an image.

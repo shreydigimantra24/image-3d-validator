@@ -15,16 +15,20 @@ Method:
 
 import os
 import uuid
+import gc
 import numpy as np
 import cv2
 
-from services.glb_renderer import render_glb_from_pose, extract_silhouette_mask
+from services.glb_renderer import render_glb_from_pose, extract_silhouette_mask, PoseRenderer
 
-# Default search space (degrees).
-DEFAULT_AZIMUTHS = list(range(0, 360, 30))          # 0,30,...,330
-DEFAULT_ELEVATIONS = [-15, 0, 15, 30]
+# Default search space (degrees). 45° azimuth step keeps the candidate count
+# (and memory/CPU) bounded while still covering all sides of the object.
+DEFAULT_AZIMUTHS = list(range(0, 360, 45))          # 0,45,...,315  (8)
+DEFAULT_ELEVATIONS = [-15, 0, 15, 30]               # (4)  → 32 candidates
 
+# Low resolution during the search; the winning pose is re-rendered full-size.
 MASK_SIZE = (256, 256)
+SEARCH_RESOLUTION = (256, 256)
 
 
 def estimate_pose(
@@ -55,33 +59,37 @@ def estimate_pose(
     input_mask = extract_silhouette_mask(image_path, MASK_SIZE)
     input_mask_path = _save_mask(input_mask, output_dir, "input_mask")
 
-    best = None  # (similarity, iou, contour, az, el, render_path)
+    # Steps 2-4: scan candidates with a SINGLE reusable renderer, computing
+    # masks in memory (no per-candidate file writes) to keep RAM bounded.
+    best = None  # (similarity, iou, contour, az, el)
+    evaluated = 0
+    try:
+        with PoseRenderer(glb_path, resolution=SEARCH_RESOLUTION) as pr:
+            for el in elevations:
+                for az in azimuths:
+                    try:
+                        render_mask = pr.mask_at(az, el)
+                        if render_mask.shape[:2] != MASK_SIZE:
+                            render_mask = cv2.resize(
+                                render_mask, MASK_SIZE, interpolation=cv2.INTER_NEAREST
+                            )
+                    except Exception:
+                        continue
 
-    # Steps 2-4: render each candidate, score silhouette similarity
-    for el in elevations:
-        for az in azimuths:
-            try:
-                render_path = render_glb_from_pose(
-                    glb_path, az, el, output_dir, resolution=resolution, suffix="cand"
-                )
-                render_mask = extract_silhouette_mask(render_path, MASK_SIZE)
-            except Exception:
-                continue
+                    evaluated += 1
+                    iou = _iou(input_mask, render_mask)
+                    contour = _contour_overlap(input_mask, render_mask)
+                    similarity = 0.7 * iou + 0.3 * contour
 
-            iou = _iou(input_mask, render_mask)
-            contour = _contour_overlap(input_mask, render_mask)
-            similarity = 0.7 * iou + 0.3 * contour
-
-            if best is None or similarity > best[0]:
-                # Remove the previous best render to avoid littering outputs.
-                if best is not None:
-                    _safe_remove(best[5])
-                best = (similarity, iou, contour, az, el, render_path)
-            else:
-                _safe_remove(render_path)
+                    if best is None or similarity > best[0]:
+                        best = (similarity, iou, contour, az, el)
+    except Exception:
+        best = None
+    finally:
+        gc.collect()
 
     if best is None:
-        # Could not render any candidate — fall back to a single front render.
+        # Could not scan any candidate — fall back to a single front render.
         aligned = render_glb_from_pose(glb_path, 0, 0, output_dir, resolution=resolution, suffix="aligned")
         return {
             "azimuth": 0,
@@ -98,10 +106,13 @@ def estimate_pose(
             "fallback": True,
         }
 
-    similarity, iou, contour, az, el, render_path = best
+    similarity, iou, contour, az, el = best
 
-    # Step 6: promote the winning render to a stable aligned_render name
-    aligned_path = _rename_aligned(render_path, output_dir)
+    # Step 6: render ONLY the winning pose at full resolution and save it.
+    aligned_path = render_glb_from_pose(
+        glb_path, az, el, output_dir, resolution=resolution, suffix="aligned_render"
+    )
+    gc.collect()
 
     return {
         "azimuth": az,
@@ -113,7 +124,7 @@ def estimate_pose(
         "aligned_render_url": f"/outputs/{os.path.basename(aligned_path)}",
         "input_mask_path": input_mask_path,
         "input_mask_url": f"/outputs/{os.path.basename(input_mask_path)}",
-        "candidates_evaluated": len(azimuths) * len(elevations),
+        "candidates_evaluated": evaluated,
         "search_space": {"azimuths": azimuths, "elevations": elevations},
         "fallback": False,
     }
@@ -160,19 +171,3 @@ def _save_mask(mask: np.ndarray, output_dir: str, suffix: str) -> str:
     path = os.path.join(output_dir, f"{uuid.uuid4()}_{suffix}.png")
     cv2.imwrite(path, mask)
     return path
-
-
-def _rename_aligned(render_path: str, output_dir: str) -> str:
-    aligned_path = os.path.join(output_dir, f"{uuid.uuid4()}_aligned_render.png")
-    try:
-        os.replace(render_path, aligned_path)
-        return aligned_path
-    except Exception:
-        return render_path
-
-
-def _safe_remove(path: str) -> None:
-    try:
-        os.remove(path)
-    except OSError:
-        pass
