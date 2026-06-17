@@ -1,0 +1,11 @@
+**/venv
+**/node_modules
+**/dist
+**/dist-ssr
+**/__pycache__
+**/*.pyc
+**/*.pyo
+**/.env 
+**/models
+**/outputs
+**uploads

@@ -1,0 +1,30 @@
+# Web Framework
+fastapi==0.115.0
+uvicorn[standard]==0.30.6
+python-multipart==0.0.9
+
+# Image Processing
+Pillow>=10.0.0
+opencv-python-headless>=4.8.0
+numpy>=1.24.0
+
+# Background Removal
+transformers>=4.40.0
+torch>=2.0.0
+torchvision>=0.15.0
+kornia>=0.7.0
+
+# Mesh Processing
+trimesh[easy]>=4.0.0
+pyrender>=0.1.45
+
+# Metrics
+scikit-image>=0.21.0
+scipy>=1.11.0
+lpips>=0.1.4
+
+# LLM
+groq>=0.4.0
+
+# Utilities
+pydantic>=2.0.0
