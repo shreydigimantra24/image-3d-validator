@@ -62,6 +62,9 @@ User Upload → Background Removal (RMBG-2.0) → Preprocessed Image
 ### Backend Setup
 
 ```bash
+# Login using Hugging face auth login
+hf auth login
+
 cd image-3d-validator
 
 # Create virtual environment
@@ -185,21 +188,6 @@ two-scale local silhouette refinement and a bounded joint optimizer that
 maximizes silhouette IoU). The resulting IoU drives the **confidence** propagated
 into every score and reason string, and the texture-metric trust gate above.
 
-### Known limitations
-
-- **Pose alignment plateaus around ~0.64 silhouette IoU.** The search is a
-  coarse global azimuth/elevation grid with only light local refinement (no
-  per-part articulation, no full differentiable-render refinement). Because per-
-  pixel texture metrics (SSIM/LPIPS) need tight overlap to be meaningful, they
-  are **confidence-gated**: below the IoU trust threshold they are down-weighted
-  in favour of an alignment-robust foreground histogram, and the reduced
-  confidence is reported. *Planned:* finer grid + a local optimizer /
-  differentiable-render refinement to push IoU (and per-pixel reliability) up.
-- **Inference is ~14.6 s/asset, dominated by alignment (~8.6 s).** The pose grid
-  is brute-forced at full search resolution. *Planned:* coarse-to-fine pose
-  search — scan at low resolution, refine only the top candidates at full
-  resolution — to cut alignment time substantially.
-
 ### Performance Monitoring
 
 Each stage (`alignment`, `geometry`, `texture`, `color`, `reasoning`,
@@ -281,63 +269,124 @@ image-3d-validator/
 └── README.md
 ```
 
-## Known Limitations & Future Work
+# Current Limitations & Future Improvements
 
-- **Single-view validation.** The pipeline validates the GLB against one
-  reference image, so only geometry, texture, and color *visible from that
-  viewpoint* are assessed — back faces, occluded parts, and unseen surfaces
-  are not. This is inherent to single-image validation. *Improvement:* accept
-  multiple reference views, or add generated novel-view consistency checks.
+## 1. Pose Alignment Accuracy (~64% Silhouette IoU)
 
-- **Pose-alignment ceiling (~64% silhouette IoU).** A single global
-  azimuth/elevation search cannot perfectly align a multi-object scene (e.g. a
-  table + 4 chairs whose relative arrangement differs from the photo). Alignment
-  quality is the main bottleneck on texture/color confidence. *Improvement:*
-  finer pose grid + local refinement (Nelder–Mead / differentiable rendering),
-  and per-object alignment for multi-part scenes.
+The current alignment process relies on a global azimuth/elevation search with limited local refinement. While effective for simple objects, it can struggle with complex scenes, articulated structures, or assets whose spatial arrangement differs from the reference image. Alignment quality is currently the primary bottleneck for downstream texture and color validation confidence.
 
-- **Per-pixel metrics depend on alignment.** SSIM/LPIPS are only reliable above
-  a high IoU; below the threshold they are down-weighted and reported at reduced
-  confidence rather than as defects. Better alignment would unlock them. 
+**Planned Improvements**
 
-- **Rendering/lighting dependence.** Color and texture comparison are sensitive
-  to render lighting; for example a metallic material renders dark without an
-  environment map. We mitigate this by comparing the asset's albedo texture
-  directly, but lit-appearance fidelity is not fully evaluated. *Improvement:*
-  full PBR render under a matched environment map with exposure/white-balance
-  normalization.
+* Finer pose sampling and search resolution
+* Local optimization (e.g., Nelder–Mead)
+* Differentiable-render refinement
+* Optional per-object alignment for multi-part scenes
 
-- **Inference time (~14s/asset, alignment ~8.6s).** Alignment dominates and is
-  not yet optimized for batch/production throughput. *Improvement:* coarse-to-
-  fine pose search (low-res first pass), GPU batching, and caching model loads.
+---
 
-- **Score calibration is hand-tuned.** The 0–100 mappings use manually chosen
-  thresholds, not a mapping calibrated against a human-rated dataset of good/bad
-  pairs. *Improvement:* calibrate (or learn) the metric→score mapping on labeled
-  examples.
+## 2. Alignment-Dependent Texture Validation
 
-- **Asset-class detection is heuristic.** "Product/assembly vs single solid" is
-  inferred from component structure; unusual assets could be misclassified,
-  changing how geometry is judged. *Improvement:* a more robust classifier or
-  an explicit per-asset config flag.
+Texture metrics such as SSIM and LPIPS require strong pixel-level correspondence between the rendered model and the reference image. When silhouette overlap falls below the confidence threshold, these metrics are automatically down-weighted and replaced with more alignment-robust histogram-based comparisons. In such cases, lower confidence is reported rather than incorrectly flagging texture defects.
 
-- **Limited artifact coverage.** Geometry checks catch structural defects and
-  silhouette mismatch but not subtler issues like UV seams, texture stretching,
-  or baking smears. *Improvement:* render-space and UV-Jacobian-based artifact
-  detectors.
+**Planned Improvements**
 
-- **Color granularity.** Color is compared globally (foreground albedo + dominant
-  color), so a localized error on one part can be diluted by the rest of the
-  object. *Improvement:* per-part / per-segment color comparison.
+* Improved pose alignment to increase per-pixel metric reliability
+* Adaptive confidence estimation based on alignment quality
 
-- **Edge cases.** Behavior on untextured, corrupt/empty, highly symmetric
-  (alignment-ambiguous), or transparent/reflective assets is not fully hardened.
-  *Improvement:* explicit handling plus a regression test suite covering these.
+---
 
-## Future Improvements
+## 3. Single-View Validation
 
-- GLB generation (TripoSR, Hunyuan3D, InstantMesh)
-- Multi-view validation
-- Batch processing
-- Export validation reports as PDF
-- Fine-tuned camera angle estimation
+Validation is currently performed against a single reference image. As a result, only geometry, texture, and color visible from that viewpoint can be evaluated. Occluded regions, back-facing surfaces, and unseen portions of the asset remain unassessed.
+
+**Planned Improvements**
+
+* Multi-view validation support
+* Novel-view consistency checks
+* Aggregated scoring across multiple viewpoints
+
+---
+
+## 4. Rendering & Lighting Sensitivity
+
+Texture and color evaluation can be influenced by rendering conditions. Materials such as metals, glass, or highly reflective surfaces may appear significantly different depending on lighting and environment settings. While direct albedo-texture analysis reduces this dependency, full appearance fidelity is not yet measured.
+
+**Planned Improvements**
+
+* Physically Based Rendering (PBR) under matched environment maps
+* Exposure and white-balance normalization
+* Lighting-invariant appearance comparison
+
+---
+
+## 5. Inference Performance (~14s per Asset)
+
+Validation runtime is currently dominated by pose alignment (~8–9 seconds), which relies on a brute-force search across candidate viewpoints.
+
+**Planned Improvements**
+
+* Coarse-to-fine pose search
+* Low-resolution candidate filtering followed by high-resolution refinement
+* GPU batching
+* Model and renderer caching
+
+---
+
+## 6. Score Calibration
+
+Quality scores are currently derived from hand-tuned metric thresholds rather than a benchmark dataset of human-rated examples. Consequently, score interpretation may not always align perfectly with human perception.
+
+**Planned Improvements**
+
+* Calibration using labeled good/bad asset pairs
+* Learned metric-to-score mappings
+* Continuous score validation against human feedback
+
+---
+
+## 7. Heuristic Asset Classification
+
+The pipeline infers whether an asset is a single object or a multi-component assembly using structural heuristics. Unusual asset structures may occasionally be misclassified, affecting geometry evaluation behavior.
+
+**Planned Improvements**
+
+* Dedicated asset-type classification models
+* User-configurable validation modes
+* Asset-specific scoring strategies
+
+---
+
+## 8. Limited Artifact Detection Coverage
+
+Current geometry validation focuses primarily on structural defects, mesh quality, and silhouette consistency. More subtle issues such as UV seams, texture stretching, baking artifacts, and shading inconsistencies are not comprehensively detected.
+
+**Planned Improvements**
+
+* UV-space analysis
+* Texture distortion metrics
+* Render-space artifact detection
+* Baking quality assessment
+
+---
+
+## 9. Global Color Evaluation
+
+Color validation currently relies on overall foreground appearance and dominant color distributions. Localized color errors affecting only a small region may be diluted within the global score.
+
+**Planned Improvements**
+
+* Region-based color comparison
+* Semantic-part segmentation
+* Per-component color consistency checks
+
+---
+
+## 10. Edge Case Robustness
+
+Special cases such as untextured assets, highly symmetric objects, transparent materials, reflective surfaces, and corrupted meshes are not yet fully hardened across all validation stages.
+
+**Planned Improvements**
+
+* Dedicated handling logic for challenging asset categories
+* Expanded regression test suite
+* Improved failure detection and reporting
