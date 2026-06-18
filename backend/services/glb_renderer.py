@@ -278,6 +278,9 @@ class PoseRenderer:
         try:
             py = self._pyrender
             scene = py.Scene.from_trimesh_scene(self.scene, bg_color=[0, 0, 0, 0])
+            # Neutral ambient (IBL stand-in) so albedo shows instead of going dark
+            # on high-metallic materials (Fix 3).
+            scene.ambient_light = np.array([0.45, 0.45, 0.45])
             self._rgb_camera = py.PerspectiveCamera(yfov=np.radians(self.fov_deg))
             self._rgb_cam_node = scene.add(self._rgb_camera)
             # Key light follows the camera; a dim fixed fill keeps far faces lit.
@@ -456,10 +459,14 @@ def _render_with_pyrender(scene, output_dir, resolution, camera_pose, suffix, fo
     import pyrender
 
     py_scene = pyrender.Scene.from_trimesh_scene(scene, bg_color=[0, 0, 0, 0])
+    # Neutral ambient fill (a cheap stand-in for an environment map / IBL) so
+    # materials render near their true albedo instead of going dark — important
+    # for high-metallic materials (Fix 3).
+    py_scene.ambient_light = np.array([0.45, 0.45, 0.45])
 
     light = pyrender.DirectionalLight(color=np.ones(3), intensity=3.0)
     py_scene.add(light, pose=camera_pose)
-    ambient = pyrender.DirectionalLight(color=np.ones(3), intensity=1.0)
+    ambient = pyrender.DirectionalLight(color=np.ones(3), intensity=1.5)
     py_scene.add(ambient)
 
     camera = pyrender.PerspectiveCamera(yfov=np.radians(fov_deg))

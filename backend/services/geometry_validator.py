@@ -2,10 +2,19 @@
 Geometry Validator Service
 
 Evaluates:
-  1. Mesh Integrity (holes, non-manifold edges, degenerate faces, floating components, watertightness)
-  2. Silhouette Matching (IoU, Chamfer Distance, Hausdorff Distance)
+  1. Silhouette Matching (IoU, Chamfer Distance, Hausdorff Distance) — render-derived
+  2. Structural soundness (genuine defects only, asset-class aware)
 
-Geometry Score = 0.4 * mesh_integrity + 0.6 * silhouette_similarity
+ASSET-CLASS AWARE SCORING (Fix 1)
+---------------------------------
+  product / assembly  →  score = structural_soundness × silhouette_factor(IoU)
+        Render-first: a structurally sound multi-part asset (furniture) stays
+        HIGH even though it is non-watertight with thousands of open-shell parts.
+        It is NEVER penalised for non-watertightness, component count, or open
+        boundary edges. The silhouette factor only pulls the score down when the
+        rendered SHAPE genuinely disagrees with the photo.
+
+  single_solid        →  score = 0.4 * mesh_integrity + 0.6 * silhouette  (legacy)
 """
 
 import numpy as np
@@ -14,6 +23,7 @@ import cv2
 from scipy.spatial.distance import directed_hausdorff
 
 from services.mesh_cache import load_combined
+from services.geometry_quality_checker import check_geometry_quality, classify_asset
 
 
 def _count_components(mesh: trimesh.Trimesh) -> int:
@@ -35,71 +45,139 @@ def validate_geometry(
     source_image_path: str,
     glb_path: str,
     rendered_image_path: str,
+    asset_class: str = None,
+    quality: dict = None,
 ) -> dict:
     """
     Run full geometry validation.
 
+    Args:
+        asset_class: "product" | "single_solid" | None (auto-detect).
+        quality: precomputed check_geometry_quality(glb_path) dict; recomputed
+            here if not supplied (keeps the function standalone-callable).
+
     Returns:
         dict with 'score' (0-100) and 'details' dict.
     """
-    # Mesh integrity
-    integrity = _mesh_integrity(glb_path)
+    if quality is None:
+        quality = check_geometry_quality(glb_path)
+    asset_class = classify_asset(quality, asset_class)
 
-    # Silhouette matching
+    # Silhouette matching (render-derived shape agreement).
     silhouette = _silhouette_matching(source_image_path, rendered_image_path)
+    iou = silhouette["metrics"]["iou"]
 
-    # Combined score
-    score = round(0.4 * integrity["score"] + 0.6 * silhouette["score"], 1)
+    if asset_class == "product":
+        # Render-first: structurally sound assembly stays HIGH; the shape factor
+        # only reduces it when the rendered outline genuinely disagrees. No
+        # penalty for watertightness / component count / open boundary edges.
+        structural = _structural_soundness(quality)
+        factor = _silhouette_factor(iou)
+        score = round(structural * factor, 1)
+        integrity = {
+            "score": round(structural, 1),
+            "mode": "product_structural",
+            "silhouette_factor": round(factor, 3),
+            "checks": _integrity_checks(quality),
+        }
+    else:
+        integrity = _mesh_integrity_legacy(quality)
+        score = round(0.4 * integrity["score"] + 0.6 * silhouette["score"], 1)
+
     score = max(0, min(100, score))
 
     return {
         "score": score,
         "details": {
+            "asset_class": asset_class,
             "mesh_integrity": integrity,
             "silhouette_matching": silhouette,
         },
     }
 
 
-# ──────────────── Mesh Integrity ────────────────
+# ──────────────── Structural soundness (product) ────────────────
 
 
-def _mesh_integrity(glb_path: str) -> dict:
-    """Analyze mesh topology and structure."""
-    combined = load_combined(glb_path)
+def _structural_soundness(quality: dict) -> float:
+    """
+    0-100 soundness from GENUINE defects only (asset-class independent signals).
+    Starts at 100 and subtracts for real problems — never for non-watertightness,
+    component count, or open boundary edges (by-design for assemblies).
+    """
+    score = 100.0
+    total_faces = max(quality.get("total_faces", 1), 1)
 
-    if combined is None:
-        return {"score": 0, "checks": {"error": "No valid meshes found"}}
+    if quality.get("nan_or_inf_vertices"):
+        return 0.0  # render-breaking; nothing else matters
 
-    # Individual checks
-    is_watertight = combined.is_watertight
-    num_components = _count_components(combined)
-    has_floating = num_components > 1
+    if not quality.get("normals_consistent", True):
+        score -= 20.0
 
-    # Non-manifold edges
-    edges = combined.edges_unique
-    edges_face_count = trimesh.grouping.group_rows(combined.edges_sorted, require_count=2)
-    # An edge shared by != 2 faces is non-manifold
-    face_adjacency = combined.face_adjacency
-    non_manifold_count = 0
+    degenerate = quality.get("degenerate_faces", 0) or 0
+    degen_ratio = degenerate / total_faces
+    if degen_ratio > 0.001:
+        score -= min(30.0, degen_ratio * 200.0)
+
+    far_floaters = quality.get("far_floaters", 0) or 0
+    if far_floaters > 0:
+        score -= min(30.0, far_floaters * 10.0)
+
+    slivers = quality.get("isolated_slivers", 0) or 0
+    if slivers > 0:
+        score -= min(15.0, slivers * 3.0)
+
+    return float(max(0.0, min(100.0, score)))
+
+
+def _silhouette_factor(iou: float) -> float:
+    """
+    Map silhouette IoU to a multiplicative shape-agreement factor in [0.6, 1.0].
+    A structurally perfect mesh with a moderate (but real) alignment keeps most
+    of its score; only a catastrophic shape mismatch drives it down hard.
+    """
     try:
-        # Use trimesh's own check
-        if hasattr(combined, "is_manifold"):
-            is_manifold = combined.is_manifold
-        else:
-            is_manifold = True  # assume manifold if check unavailable
-    except Exception:
-        is_manifold = True
+        v = float(iou)
+    except (TypeError, ValueError):
+        return 0.85
+    if v >= 0.85:
+        return 1.0
+    if v >= 0.5:
+        return 0.9 + (v - 0.5) / 0.35 * 0.1
+    if v >= 0.3:
+        return 0.8 + (v - 0.3) / 0.2 * 0.1
+    return 0.6 + max(0.0, v) / 0.3 * 0.2
 
-    # Degenerate faces (zero-area triangles)
-    face_areas = combined.area_faces
-    degenerate_count = int(np.sum(face_areas < 1e-10))
-    total_faces = len(combined.faces)
-    degenerate_ratio = degenerate_count / max(total_faces, 1)
 
-    # Scoring
+def _integrity_checks(quality: dict) -> dict:
+    """Surface the descriptors + genuine-defect signals (no derived score caps)."""
+    return {
+        "is_watertight": quality.get("is_watertight"),
+        "num_components": quality.get("components"),
+        "substantial_components": quality.get("substantial_components"),
+        "degenerate_faces": quality.get("degenerate_faces"),
+        "normals_consistent": quality.get("normals_consistent"),
+        "nan_or_inf_vertices": quality.get("nan_or_inf_vertices"),
+        "isolated_slivers": quality.get("isolated_slivers"),
+        "far_floaters": quality.get("far_floaters"),
+        "total_faces": quality.get("total_faces"),
+        "vertex_count": quality.get("total_vertices"),
+    }
+
+
+def _mesh_integrity_legacy(quality: dict) -> dict:
+    """Legacy topology-weighted integrity for single_solid assets, derived from
+    the shared quality dict (no extra mesh load)."""
+    is_watertight = bool(quality.get("is_watertight"))
+    num_components = quality.get("components", 1) or 1
+    has_floating = num_components > 1
+    normals_ok = quality.get("normals_consistent", True)
+    degenerate_count = quality.get("degenerate_faces", 0) or 0
+    total_faces = max(quality.get("total_faces", 1), 1)
+    degenerate_ratio = degenerate_count / total_faces
+
     watertight_score = 100 if is_watertight else 40
-    manifold_score = 100 if is_manifold else 50
+    manifold_score = 100 if normals_ok else 50
     component_score = 100 if not has_floating else max(0, 100 - (num_components - 1) * 20)
     degenerate_score = max(0, 100 - degenerate_ratio * 500)
 
@@ -112,15 +190,15 @@ def _mesh_integrity(glb_path: str) -> dict:
 
     return {
         "score": round(integrity_score, 1),
+        "mode": "single_solid_legacy",
         "checks": {
             "is_watertight": is_watertight,
-            "is_manifold": is_manifold,
             "num_components": num_components,
             "has_floating_components": has_floating,
             "degenerate_faces": degenerate_count,
             "total_faces": total_faces,
             "degenerate_ratio": round(degenerate_ratio, 4),
-            "vertex_count": len(combined.vertices),
+            "vertex_count": quality.get("total_vertices"),
         },
     }
 

@@ -50,13 +50,17 @@ from services.glb_renderer import (
 logger = logging.getLogger(__name__)
 
 # ── Rotation search (coarse) ──
-STAGE1_AZIMUTHS = list(range(0, 360, 30))      # 0,30,...,330 (12) — denser so
-STAGE1_ELEVATIONS = [-15, 0, 15, 30]           # opposite sides are well sampled
+# Finer azimuth/elevation grid (Fix 4) so the coarse scan lands close enough for
+# local refinement + the joint optimiser to drive silhouette IoU up. 20° azimuth
+# steps × 6 elevations = 108 candidates (was 30° × 4 = 48).
+STAGE1_AZIMUTHS = list(range(0, 360, 20))      # 0,20,...,340 (18)
+STAGE1_ELEVATIONS = [-20, -10, 0, 15, 30, 45]  # opposite sides well sampled
 ELEVATION_CLAMP = (-45.0, 60.0)
 
-# Per-candidate local refinement window (degrees).
-REFINE_AZ = [-6.0, -3.0, 0.0, 3.0, 6.0]
-REFINE_EL = [-6.0, -3.0, 0.0, 3.0, 6.0]
+# Per-candidate local refinement window (degrees) — two scales for a finer
+# silhouette-IoU search around each Top-K candidate before the joint optimiser.
+REFINE_AZ = [-6.0, -3.0, -1.5, 0.0, 1.5, 3.0, 6.0]
+REFINE_EL = [-6.0, -3.0, -1.5, 0.0, 1.5, 3.0, 6.0]
 
 # ── Top-K appearance re-ranking ──
 TOP_K = 8

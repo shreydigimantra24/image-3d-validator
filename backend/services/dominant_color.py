@@ -9,6 +9,7 @@ input image's dominant palette and the aligned render's palette in LAB space.
 
 import numpy as np
 import cv2
+from skimage.color import deltaE_ciede2000
 
 N_CLUSTERS = 5
 
@@ -21,20 +22,30 @@ def analyze_dominant_colors(
     source_image_path: str,
     rendered_image_path: str,
     n_clusters: int = N_CLUSTERS,
+    render_rgb: "np.ndarray|None" = None,
 ) -> dict:
     """
-    Cluster foreground colors of both images and match dominant palettes.
+    Cluster foreground colors of both images and match dominant palettes in LAB
+    using ΔE2000.
+
+    Args:
+        render_rgb: optional HxWx3 uint8 RGB array used as the model's color
+            reference INSTEAD of loading rendered_image_path — pass the asset's
+            albedo texture here so the palette match is lighting-independent.
 
     Returns dict:
         {
-          "dominant_color_distance": float,   # mean LAB ΔE of matched palette
+          "dominant_color_distance": float,   # weighted mean ΔE2000 of matched palette
           "source_palette": [{"rgb":[r,g,b], "weight":float}, ...],
           "render_palette": [...],
           "primary_shift": {"source_rgb":[...], "render_rgb":[...], "delta_e":float}
         }
     """
     src_palette = _dominant_palette(source_image_path, n_clusters)
-    rnd_palette = _dominant_palette(rendered_image_path, n_clusters)
+    if render_rgb is not None and render_rgb.size > 0:
+        rnd_palette = _dominant_palette_from_rgb(render_rgb, n_clusters)
+    else:
+        rnd_palette = _dominant_palette(rendered_image_path, n_clusters)
 
     if not src_palette or not rnd_palette:
         return {
@@ -95,6 +106,21 @@ def _dominant_palette(image_path: str, n_clusters: int):
     rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
 
     pixels = rgb[mask > 0].astype(np.float32)
+    return _cluster_pixels(pixels, n_clusters)
+
+
+def _dominant_palette_from_rgb(rgb: np.ndarray, n_clusters: int):
+    """Palette of an in-memory RGB array (e.g. the albedo texture). Treats every
+    pixel as foreground — albedo is pure surface color."""
+    rgb = np.asarray(rgb)
+    if rgb.ndim != 3 or rgb.shape[-1] < 3:
+        return []
+    pixels = rgb[:, :, :3].reshape(-1, 3).astype(np.float32)
+    return _cluster_pixels(pixels, n_clusters)
+
+
+def _cluster_pixels(pixels: np.ndarray, n_clusters: int):
+    """KMeans a set of RGB pixels into a weighted palette."""
     if len(pixels) < n_clusters:
         return []
 
@@ -143,16 +169,19 @@ def _matched_palette_distance(src_palette, rnd_palette) -> float:
 
 
 def _delta_e_lab(rgb_a, rgb_b) -> float:
-    """CIE76 ΔE between two RGB colors."""
+    """CIEDE2000 ΔE between two RGB colors (perceptually accurate; replaces CIE76)."""
     lab_a = _rgb_to_lab(rgb_a)
     lab_b = _rgb_to_lab(rgb_b)
-    return float(np.sqrt(np.sum((lab_a - lab_b) ** 2)))
+    return float(deltaE_ciede2000(lab_a.reshape(1, 3), lab_b.reshape(1, 3))[0])
 
 
 def _rgb_to_lab(rgb) -> np.ndarray:
-    arr = np.clip(np.array(rgb, dtype=np.uint8).reshape(1, 1, 3), 0, 255)
-    lab = cv2.cvtColor(arr, cv2.COLOR_RGB2LAB).astype(np.float64).reshape(3)
-    return lab
+    """Standard CIE Lab (L 0-100) via skimage — matches deltaE_ciede2000's domain.
+    (cv2's LAB is 0-255 scaled and would corrupt ΔE2000.)"""
+    from skimage.color import rgb2lab
+
+    arr = np.clip(np.array(rgb, dtype=np.float32).reshape(1, 1, 3), 0, 255) / 255.0
+    return rgb2lab(arr).astype(np.float64).reshape(3)
 
 
 def _palette_to_json(palette):

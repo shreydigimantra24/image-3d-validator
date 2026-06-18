@@ -10,7 +10,13 @@ import os
 import json
 
 
-def generate_reasons(scores: dict, details: dict, alignment: dict = None) -> dict:
+def generate_reasons(
+    scores: dict,
+    details: dict,
+    alignment: dict = None,
+    confidences: dict = None,
+    material: dict = None,
+) -> dict:
     """
     Generate human-readable explanations for validation scores using Groq LLM.
 
@@ -19,19 +25,26 @@ def generate_reasons(scores: dict, details: dict, alignment: dict = None) -> dic
         details: dict with 'geometry', 'texture', 'color' detail dicts.
         alignment: optional camera-pose result (azimuth/elevation/iou/confidence,
             plus the 'debug' block produced by the pose estimator).
+        confidences: optional per-score confidence + alignment trust flags (Fix 4).
+        material: optional material inspection result with warnings (Fix 3).
 
     Returns:
         dict with 'geometry_reason', 'texture_reason', 'color_reason'.
     """
+    confidences = confidences or {}
+    material = material or {}
     try:
-        return _generate_with_groq(scores, details, alignment)
+        return _generate_with_groq(scores, details, alignment, confidences, material)
     except Exception as e:
         # Fallback: generate template-based reasons
         print(f"Groq LLM unavailable, using template fallback: {e}")
-        return _generate_template_reasons(scores, details, alignment)
+        return _generate_template_reasons(scores, details, alignment, confidences, material)
 
 
-def _generate_with_groq(scores: dict, details: dict, alignment: dict = None) -> dict:
+def _generate_with_groq(
+    scores: dict, details: dict, alignment: dict = None,
+    confidences: dict = None, material: dict = None,
+) -> dict:
     """Call Groq API for LLM-based reasoning."""
     from groq import Groq
 
@@ -58,10 +71,47 @@ def _generate_with_groq(scores: dict, details: dict, alignment: dict = None) -> 
             "trustworthy; a low IoU means the shapes themselves differ.\n"
         )
 
+    asset_class = (details.get("geometry", {}) or {}).get("asset_class", "product")
+    conf_block = ""
+    if confidences:
+        conf_block = (
+            f"\n## Confidence\n"
+            f"- Alignment IoU: {confidences.get('alignment_iou')} "
+            f"(trusted: {confidences.get('alignment_trusted')})\n"
+            f"- Per-score confidence — geometry {confidences.get('geometry')}, "
+            f"texture {confidences.get('texture')}, color {confidences.get('color')}\n"
+            "If alignment is NOT trusted, say plainly that per-pixel texture metrics "
+            "(SSIM/LPIPS) were down-weighted and an alignment-robust comparison was used, "
+            "so confidence is reduced.\n"
+        )
+    material_block = ""
+    if material:
+        warns = material.get("warnings") or []
+        material_block = (
+            f"\n## Material\n"
+            f"- metallicFactor: {material.get('metallic_factor')}, "
+            f"roughnessFactor: {material.get('roughness_factor')}, "
+            f"has baseColor texture: {material.get('has_base_color_texture')}\n"
+            + ("- WARNINGS: " + "; ".join(warns) + "\n" if warns else "")
+        )
+
+    guidance = (
+        f"\n## IMPORTANT scoring rules ({asset_class} asset)\n"
+        "- This is a multi-part PRODUCT/ASSEMBLY mesh. Non-watertightness, large "
+        "connected-component counts, and open boundary edges are BY DESIGN and are "
+        "NOT defects — do NOT describe them as problems or cite their counts as faults.\n"
+        "- Geometry is judged on structural soundness (NaN/inf, normals, degenerate "
+        "faces, true floaters) plus how well the rendered silhouette matched the photo.\n"
+        "- Color is judged on the asset's baseColor ALBEDO texture vs the photo, not on "
+        "an unlit render. If metallicFactor is high, explain that the albedo may MATCH "
+        "the photo while the model still LOOKS dark under lighting (a material issue, not "
+        "a color mismatch). Do not assert a large color mismatch when albedo matches.\n"
+    ) if asset_class == "product" else ""
+
     prompt = f"""You are an expert 3D model quality analyst writing for a non-technical user
 (a designer or store owner) who needs to understand WHY their model scored the way it did
 and WHAT to do about it.
-{alignment_block}
+{alignment_block}{conf_block}{material_block}{guidance}
 ## Scores (0-100, higher is better)
 - Geometry: {scores['geometry']}/100
 - Texture: {scores['texture']}/100
@@ -81,6 +131,16 @@ For EACH category write 2-4 sentences that:
    ("re-export with watertight geometry", "bake a texture and UV-unwrap", "adjust the
    base color toward the source").
 4. Mention any score gates/caps that were applied and why.
+5. NEVER use an adjective that contradicts its number. Know each metric's scale:
+   histogram correlation and SSIM are 0–1 (1 = identical, so 0.16 is WEAK, not
+   strong); ΔE2000 is a distance (0 = identical, lower is better). The texture
+   surface-appearance metrics are computed on the SAME exposure-normalized image
+   as color, so do not claim the surface "looks different" while color "matches".
+6. TEXTURE: if the material, texture image and UVs are present/valid, do NOT call
+   the texture a defect. Cite texture presence, its resolution, and valid UVs;
+   when alignment IoU is low, say per-pixel SSIM/LPIPS is limited by alignment and
+   report REDUCED CONFIDENCE — do not say "visibly different". The texture verdict
+   must agree with color that the surface/albedo is essentially correct.
 
 Avoid raw jargon without a short explanation. Be specific, accurate, and encouraging.
 
@@ -155,6 +215,29 @@ def _ssim_phrase(s):
     return f"SSIM {v} — the surface differs clearly from the photo"
 
 
+def _corr_phrase(corr):
+    """
+    Map an OpenCV HISTCMP_CORREL value (1 = identical distributions, 0 = none,
+    negative = anti-correlated) to a descriptor. The adjective is DERIVED from the
+    value via these thresholds so the word can never contradict the number (Fix A).
+    """
+    try:
+        v = float(corr)
+    except (TypeError, ValueError):
+        return None
+    if v >= 0.8:
+        word = "strong"
+    elif v >= 0.6:
+        word = "moderate"
+    elif v >= 0.4:
+        word = "fair"
+    elif v >= 0.2:
+        word = "weak"
+    else:
+        word = "very weak"
+    return f"{word} foreground histogram correlation ({round(v, 4)}, where 1.0 = identical)"
+
+
 def _delta_e_phrase(de):
     try:
         v = float(de)
@@ -189,75 +272,110 @@ def _alignment_sentence(alignment) -> str:
 # ──────────────── Template fallback ────────────────
 
 
-def _generate_template_reasons(scores: dict, details: dict, alignment: dict = None) -> dict:
-    """Detailed, user-friendly template reasons when the LLM is unavailable."""
+def _generate_template_reasons(
+    scores: dict, details: dict, alignment: dict = None,
+    confidences: dict = None, material: dict = None,
+) -> dict:
+    """Detailed, user-friendly template reasons when the LLM is unavailable.
+
+    Every figure below is pulled from its OWN metric variable (Fix 2): `holes`
+    from quality_checks.holes, `comps` from quality_checks.components, etc. — they
+    are never interchanged.
+    """
     reasons = {}
+    confidences = confidences or {}
+    material = material or {}
     align_note = _alignment_sentence(alignment)
 
-    # ── Geometry ──
+    # ── Geometry (asset-class aware — Fix 1) ──
     g_score = scores["geometry"]
     g_details = details.get("geometry", {})
-    mesh_info = g_details.get("mesh_integrity", {}).get("checks", {})
+    asset_class = g_details.get("asset_class", "product")
     sil_info = g_details.get("silhouette_matching", {}).get("metrics", {})
     qc = g_details.get("quality_checks", {})
     gate_g = g_details.get("gating", {})
 
-    holes = int(qc.get("holes", 0) or 0)
+    # Each number from its own variable — no swapping (Fix 2).
     comps = int(qc.get("components", 1) or 1)
+    substantial = int(qc.get("substantial_components", 0) or 0)
     degen = int(qc.get("degenerate_faces", 0) or 0)
-    watertight = mesh_info.get("is_watertight")
+    floaters = int(qc.get("far_floaters", 0) or 0)
+    slivers = int(qc.get("isolated_slivers", 0) or 0)
+    normals_ok = qc.get("normals_consistent", True)
     iou = sil_info.get("iou", alignment.get("iou") if alignment else None)
 
-    defects = []
-    if holes > 0:
-        defects.append(
-            f"{_num(holes)} holes (gaps in the surface where the mesh isn't sealed)"
-        )
-    if comps > 1:
-        defects.append(
-            f"{_num(comps)} disconnected components (separate floating pieces that aren't "
-            f"joined to the main body)"
-        )
-    if degen > 0:
-        defects.append(
-            f"{_num(degen)} degenerate faces (zero-area triangles that can cause rendering glitches)"
-        )
+    if asset_class == "product":
+        # Genuine defects ONLY — never holes/components/watertightness.
+        defects = []
+        if not normals_ok:
+            defects.append("inconsistent face normals (some faces wound inside-out)")
+        if floaters > 0:
+            defects.append(f"{_num(floaters)} detached part(s) floating far from the body")
+        if slivers > 0:
+            defects.append(f"{_num(slivers)} stray sliver triangle(s)")
+        if degen > 0:
+            defects.append(f"{_num(degen)} degenerate (zero-area) face(s)")
 
-    if g_score >= 80:
-        g_reason = "The mesh structure is solid"
-        g_reason += " and watertight (fully sealed)." if watertight else "."
-        if iou is not None:
-            g_reason += f" Its outline matches the photo well, with {_iou_phrase(iou)}."
-    elif g_score >= 50:
-        g_reason = "The geometry is acceptable but has some issues. "
-        if defects:
-            g_reason += "We found " + "; ".join(defects) + ". "
-        if not watertight:
-            g_reason += "The mesh is also not watertight (it has open edges). "
-        g_reason += (
-            "These won't necessarily break the model but can cause rendering artifacts "
-            "or problems in 3D printing and physics."
-        )
-    else:
-        g_reason = "We detected significant structural problems with this mesh. "
-        if defects:
-            g_reason += "Specifically: " + "; ".join(defects) + ". "
-            g_reason += (
-                "High counts like these usually mean the model was exported without "
-                "cleanup — re-exporting with merged/sealed geometry should improve the score."
+        if g_score >= 80:
+            g_reason = (
+                f"The mesh is structurally sound. It is a multi-part assembly "
+                f"({_num(comps)} separate pieces, {_num(substantial)} of them substantial "
+                f"parts), which is expected for this kind of product — the open shells and "
+                f"non-watertight surfaces are by design, not defects."
             )
+        elif g_score >= 50:
+            g_reason = "The mesh is mostly sound, with a few genuine issues. "
+            if defects:
+                g_reason += "We found " + "; ".join(defects) + ". "
+            g_reason += "Its many open-shell parts are normal for an assembly and were not penalised."
         else:
-            g_reason += "The mesh shape deviates noticeably from the source silhouette."
+            g_reason = "We detected genuine structural problems. "
+            if defects:
+                g_reason += "Specifically: " + "; ".join(defects) + ". "
+            else:
+                g_reason += "The rendered shape deviated noticeably from the photo silhouette."
+    else:
+        # single_solid: legacy topology-aware messaging.
+        mesh_info = g_details.get("mesh_integrity", {}).get("checks", {})
+        watertight = mesh_info.get("is_watertight")
+        holes = int(qc.get("holes", 0) or 0)
+        defects = []
+        if holes > 0:
+            defects.append(f"{_num(holes)} open boundary loops (unsealed holes)")
+        if comps > 1:
+            defects.append(f"{_num(comps)} disconnected components")
+        if degen > 0:
+            defects.append(f"{_num(degen)} degenerate faces")
+        if g_score >= 80:
+            g_reason = "The mesh structure is solid"
+            g_reason += " and watertight." if watertight else "."
+            if iou is not None:
+                g_reason += f" Its outline matches the photo, with {_iou_phrase(iou)}."
+        elif g_score >= 50:
+            g_reason = "The geometry is acceptable but has issues. "
+            if defects:
+                g_reason += "We found " + "; ".join(defects) + ". "
+            if not watertight:
+                g_reason += "The mesh is not watertight. "
+        else:
+            g_reason = "We detected significant structural problems. "
+            if defects:
+                g_reason += "Specifically: " + "; ".join(defects) + ". "
 
     if gate_g.get("gated"):
         g_reason += (
-            f" Because of these defects the score was capped by structural safety limits "
+            f" The score was capped by structural safety limits "
             f"({'; '.join(gate_g.get('applied_gates', []))})."
         )
     g_reason += align_note
     reasons["geometry_reason"] = g_reason
 
     # ── Texture ──
+    #
+    # Texture similarity is measured on the SAME non-dark image basis as color
+    # (color_validator.prepare_comparison). When the data is present/valid, a low
+    # per-pixel SSIM/LPIPS is attributed to weak alignment or the metallic/lighting
+    # appearance — NOT a texture defect — so this panel agrees with color.
     t_score = scores["texture"]
     t_details = details.get("texture", {})
     tp = t_details.get("texture_presence", {}).get("checks", {})
@@ -268,47 +386,77 @@ def _generate_template_reasons(scores: dict, details: dict, alignment: dict = No
     has_texture = pres.get("texture_present", tp.get("has_texture"))
     has_uv = pres.get("uv_present", tp.get("has_uv_coordinates"))
     has_material = pres.get("material_present", tp.get("has_material"))
-    ssim = _ssim_phrase(perc.get("ssim_raw"))
+    resolution = pres.get("texture_resolution")
+    trusted = perc.get("trusted")
+    t_conf = confidences.get("texture")
+    mat_warnings = material.get("warnings") or []
 
-    present = []
     missing = []
     for label, flag in (("a material", has_material), ("a texture image", has_texture),
                         ("UV coordinates", has_uv)):
-        (present if flag else missing).append(label)
+        if not flag:
+            missing.append(label)
 
-    if t_score >= 80:
-        t_reason = "The texturing is high quality"
-        t_reason += f" — {ssim}." if ssim else "."
-        if present:
-            t_reason += f" The model includes {', '.join(present)}."
-    elif t_score >= 50:
-        t_reason = "Texture quality is moderate"
-        t_reason += f" — {ssim}." if ssim else "."
-        if missing:
-            t_reason += (
-                f" It's missing {', '.join(missing)}, which limits how faithfully the "
-                f"surface can match the photo."
-            )
-        else:
-            t_reason += " Some perceptual differences from the source remain."
+    # Describe the texture data that IS present (presence + resolution + UVs).
+    if resolution and len(resolution) == 2:
+        tex_desc = f"a {int(resolution[0])}×{int(resolution[1])} baseColor texture"
     else:
-        t_reason = "Texture quality is poor. "
+        tex_desc = "a baseColor texture"
+    present_facts = []
+    if has_material:
+        present_facts.append("a material")
+    if has_texture:
+        present_facts.append(tex_desc)
+    if has_uv:
+        present_facts.append("valid UV coordinates")
+    facts = ", ".join(present_facts) if present_facts else "no texture data"
+
+    if missing or gate_t.get("gated"):
+        # GENUINE defect: required texture data is actually missing.
+        t_reason = "Texture quality is limited by missing data. "
         if missing:
             t_reason += (
                 f"The model is missing {', '.join(missing)}. Without these the renderer "
-                f"can't reproduce the photographed surface — UV-unwrapping the mesh and "
-                f"baking/assigning a texture image would fix most of this."
+                f"can't reproduce the photographed surface — UV-unwrap the mesh and "
+                f"bake/assign a texture image to fix most of this."
             )
-        else:
-            t_reason += "The rendered texture differs substantially from the source image."
-        if ssim:
-            t_reason += f" ({ssim}.)"
-
-    if gate_t.get("gated"):
-        t_reason += (
-            f" The score was capped because required texture data is missing "
-            f"({'; '.join(gate_t.get('applied_gates', []))})."
+        if gate_t.get("gated"):
+            t_reason += (
+                f" The score was capped because required texture data is missing "
+                f"({'; '.join(gate_t.get('applied_gates', []))})."
+            )
+    elif trusted is False:
+        # Data is complete; the only limit is weak alignment / lighting. NOT a defect.
+        t_reason = (
+            f"The texture data is complete and valid — the model has {facts}. "
+            f"Its surface color matches the photo (see the color analysis). "
+            f"Per-pixel similarity (SSIM/LPIPS) could only be measured at "
+            f"{_iou_phrase(perc.get('alignment_iou'))}, which limits those metrics, so the "
+            f"texture result is reported at reduced confidence ({t_conf}) rather than as a "
+            f"texture defect."
         )
+        if mat_warnings:
+            t_reason += (
+                " The darker rendered appearance comes from the material's metallic setting, "
+                "not the texture itself."
+            )
+    else:
+        # Trusted alignment: per-pixel similarity is meaningful here.
+        ssim = _ssim_phrase(perc.get("ssim_raw"))
+        if t_score >= 80:
+            t_reason = "The texturing is high quality"
+            t_reason += f" — {ssim}." if ssim else "."
+            t_reason += f" The model includes {facts}."
+        else:
+            t_reason = f"The model has {facts}"
+            t_reason += f", and {ssim}." if ssim else "."
+            t_reason += (
+                " With alignment trustworthy, the remaining per-pixel difference reflects a "
+                "genuine surface/detail gap."
+            )
+        if t_conf is not None:
+            t_reason += f" (Confidence {t_conf}.)"
+
     reasons["texture_reason"] = t_reason
 
     # ── Color ──
@@ -318,37 +466,51 @@ def _generate_template_reasons(scores: dict, details: dict, alignment: dict = No
     hist = c_details.get("histogram", {}).get("metrics", {})
     de_val, de_meaning = _delta_e_phrase(de.get("mean_delta_e"))
 
+    reference = c_details.get("reference", "")
+    on_albedo = reference == "albedo_texture"
+    ref_word = "albedo texture" if on_albedo else "lighting-normalized render"
+
     dom = c_details.get("dominant_color", {})
     shift = (dom or {}).get("primary_shift")
     shift_note = ""
     if shift and shift.get("delta_e", 0) >= 10:
         shift_note = (
-            f" The dominant color also shifted noticeably (ΔE {shift['delta_e']}), "
+            f" The dominant color also shifts (ΔE2000 {shift['delta_e']}), "
             f"from RGB {shift['source_rgb']} in the photo toward {shift['render_rgb']} "
-            f"in the render."
+            f"in the {'albedo' if on_albedo else 'render'}."
         )
 
     if c_score >= 80:
         c_reason = (
-            f"Color reproduction is accurate ({de_val}, {de_meaning})"
+            f"Color is accurate: comparing the asset's {ref_word} against the photo "
+            f"foreground gives {de_val} (CIEDE2000), {de_meaning}."
         )
+        # Histogram correlation is a secondary distribution cue (the ΔE2000 above
+        # is the verdict). Only mention it when it actually corroborates — never
+        # headline a weak value next to an "accurate" finding.
         corr = hist.get("avg_correlation")
-        if corr is not None:
-            c_reason += f", with strong histogram correlation ({corr})."
-        else:
-            c_reason += "."
+        if corr is not None and float(corr) >= 0.4:
+            c_reason += f" This is corroborated by {_corr_phrase(corr)}."
     elif c_score >= 50:
         c_reason = (
-            f"Color accuracy is moderate. The {de_val} indicates {de_meaning} between the "
-            f"render and the photo — recognizable, but viewers will spot it on close comparison."
+            f"Color accuracy is moderate. Comparing the {ref_word} with the photo gives "
+            f"{de_val} (CIEDE2000) — {de_meaning}, recognizable but visible on close comparison."
         )
     else:
         c_reason = (
-            f"Color differs substantially from the source ({de_val}, {de_meaning}). "
-            f"Adjusting the model's base/material colors toward the photographed colors "
-            f"would close most of this gap."
+            f"Color differs substantially from the photo ({de_val}, CIEDE2000 — {de_meaning}). "
+            f"Adjusting the base/albedo colors toward the photographed colors would close the gap."
         )
     c_reason += shift_note
+
+    # Material caveat (Fix 3): albedo can MATCH while the lit render looks dark.
+    mat_warnings = material.get("warnings") or []
+    if mat_warnings:
+        c_reason += (
+            f" Material note: {mat_warnings[0]} The albedo color above is the asset's true "
+            f"surface color; the dark look under lighting is a material setting, not a color "
+            f"mismatch — set metallicFactor toward 0 (or add an environment map) to fix the look."
+        )
     reasons["color_reason"] = c_reason
 
     return reasons

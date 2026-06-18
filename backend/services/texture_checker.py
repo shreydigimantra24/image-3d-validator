@@ -35,6 +35,7 @@ def check_texture_presence(glb_path: str) -> dict:
     has_vertex_colors = False
     material_count = 0
     texture_count = 0
+    texture_resolution = None  # (width, height) of the baseColor texture
 
     for geom in scene.geometry.values():
         if not isinstance(geom, trimesh.Trimesh):
@@ -50,6 +51,8 @@ def check_texture_presence(glb_path: str) -> dict:
             if _material_has_image(material):
                 texture_present = True
                 texture_count += 1
+                if texture_resolution is None:
+                    texture_resolution = _material_texture_size(material)
 
         uv = getattr(visual, "uv", None)
         if uv is not None and len(uv) > 0:
@@ -68,6 +71,7 @@ def check_texture_presence(glb_path: str) -> dict:
         "material_count": material_count,
         "texture_count": texture_count,
         "has_vertex_colors": has_vertex_colors,
+        "texture_resolution": list(texture_resolution) if texture_resolution else None,
     }
 
 
@@ -125,3 +129,13 @@ def _material_has_image(material) -> bool:
     if hasattr(material, "baseColorTexture") and getattr(material, "baseColorTexture") is not None:
         return True
     return False
+
+
+def _material_texture_size(material):
+    """Return (width, height) of the material's baseColor/diffuse image, or None."""
+    for attr in ("baseColorTexture", "image"):
+        img = getattr(material, attr, None)
+        size = getattr(img, "size", None)  # PIL images expose .size = (w, h)
+        if size and len(size) == 2:
+            return (int(size[0]), int(size[1]))
+    return None

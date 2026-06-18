@@ -6,15 +6,21 @@ Evaluates:
   2. Perceptual Comparison (SSIM, LPIPS)
 
 Texture Score = 0.2 * texture_presence + 0.4 * ssim_score + 0.4 * lpips_score
+
+Perceptual metrics are computed on the SAME non-dark appearance image the color
+module uses (color_validator.prepare_comparison) — the render with luminance
+normalized to the source, NEVER the raw dark metallic render (Fix B). This keeps
+the texture and color panels from contradicting each other.
 """
 
 import numpy as np
 import trimesh
 import cv2
-from PIL import Image
 from skimage.metrics import structural_similarity as ssim
 
 from services.mesh_cache import load_scene
+from services.validation_config import IOU_TRUST_THRESHOLD
+from services.color_validator import prepare_comparison
 
 # Cached LPIPS network. Instantiating lpips.LPIPS(net="alex") per call reloads
 # AlexNet weights and leaks CPU/VRAM (PyTorch's caching allocator does not
@@ -36,30 +42,67 @@ def validate_texture(
     source_image_path: str,
     rendered_image_path: str,
     glb_path: str,
+    alignment: dict = None,
+    albedo_rgb: "np.ndarray|None" = None,
 ) -> dict:
     """
     Run full texture validation.
 
-    Returns:
-        dict with 'score' (0-100) and 'details' dict.
+    Per-pixel SSIM/LPIPS only compare meaningfully when the render and photo
+    silhouettes overlap tightly (Fix 4). When alignment IoU is below
+    IOU_TRUST_THRESHOLD we DO NOT trust SSIM/LPIPS; instead we score on an
+    alignment-robust foreground LAB histogram and report reduced confidence.
+
+    All perceptual metrics run on the shared non-dark appearance image
+    (color_validator.prepare_comparison) — the exposure-normalized render, never
+    the raw dark metallic render (Fix B).
+
+    Args:
+        alignment: optional pose result carrying 'iou' / 'confidence'. If None,
+            alignment is assumed adequate (legacy behaviour).
+        albedo_rgb: optional albedo texture, forwarded to prepare_comparison so
+            texture and color share the same comparison basis.
+
+    Returns dict with 'score' (0-100), 'confidence' (0-1) and 'details'.
     """
-    # Texture presence check
     presence = _texture_presence(glb_path)
 
-    # Perceptual comparison
-    perceptual = _perceptual_comparison(source_image_path, rendered_image_path)
+    # SAME non-dark basis as the color module.
+    basis = prepare_comparison(source_image_path, rendered_image_path, albedo_rgb)
+    src_bgr, src_mask = basis["src_bgr"], basis["src_mask"]
+    app_bgr, app_mask = basis["appearance_bgr"], basis["appearance_mask"]
 
-    # Combined score
-    score = round(
-        0.2 * presence["score"]
-        + 0.4 * perceptual["ssim_score"]
-        + 0.4 * perceptual["lpips_score"],
-        1,
-    )
-    score = max(0, min(100, score))
+    iou = None if alignment is None else alignment.get("iou")
+    trusted = iou is None or float(iou) >= IOU_TRUST_THRESHOLD
 
+    perceptual = _perceptual_comparison(src_bgr, app_bgr)
+
+    if trusted:
+        score = (
+            0.2 * presence["score"]
+            + 0.4 * perceptual["ssim_score"]
+            + 0.4 * perceptual["lpips_score"]
+        )
+        metric_used = "ssim+lpips"
+        confidence = 1.0 if iou is None else round(float(iou), 3)
+    else:
+        # Low IoU → SSIM/LPIPS compare partly non-overlapping content. Fall back
+        # to a translation-robust foreground LAB-histogram similarity.
+        hist_sim = _foreground_hist_similarity(src_bgr, src_mask, app_bgr, app_mask)
+        score = 0.5 * presence["score"] + 0.5 * hist_sim
+        metric_used = "foreground_lab_histogram (low-IoU fallback)"
+        confidence = round(float(iou) * 0.6, 3)
+        perceptual["histogram_similarity"] = round(hist_sim, 1)
+
+    perceptual["metric_used"] = metric_used
+    perceptual["trusted"] = trusted
+    perceptual["alignment_iou"] = None if iou is None else round(float(iou), 4)
+    perceptual["comparison_basis"] = basis["appearance_basis"]
+
+    score = round(max(0, min(100, score)), 1)
     return {
         "score": score,
+        "confidence": confidence,
         "details": {
             "texture_presence": presence,
             "perceptual": perceptual,
@@ -124,42 +167,22 @@ def _texture_presence(glb_path: str) -> dict:
 
 
 # ──────────────── Perceptual Comparison ────────────────
+#
+# All helpers operate on prepared BGR image ARRAYS (the shared non-dark
+# appearance basis) rather than re-reading the raw render from disk (Fix B).
 
 
-def _load_and_prepare(image_path: str, target_size: tuple = (256, 256)) -> np.ndarray:
-    """Load and resize an image to a common size for comparison."""
-    img = cv2.imread(image_path, cv2.IMREAD_UNCHANGED)
-    if img is None:
-        raise ValueError(f"Could not load image: {image_path}")
-
-    # Convert BGRA to BGR if needed
-    if img.shape[-1] == 4:
-        # Composite alpha over white background
-        alpha = img[:, :, 3:4] / 255.0
-        rgb = img[:, :, :3]
-        white = np.ones_like(rgb) * 255
-        img = (rgb * alpha + white * (1 - alpha)).astype(np.uint8)
-
-    img = cv2.resize(img, target_size, interpolation=cv2.INTER_AREA)
-    return img
-
-
-def _compute_ssim(source_path: str, rendered_path: str) -> float:
-    """Compute Structural Similarity Index between two images."""
-    img1 = _load_and_prepare(source_path)
-    img2 = _load_and_prepare(rendered_path)
-
-    # Convert to grayscale for SSIM
-    gray1 = cv2.cvtColor(img1, cv2.COLOR_BGR2GRAY)
-    gray2 = cv2.cvtColor(img2, cv2.COLOR_BGR2GRAY)
-
+def _compute_ssim(src_bgr: np.ndarray, model_bgr: np.ndarray) -> float:
+    """Compute Structural Similarity Index between two prepared BGR images."""
+    gray1 = cv2.cvtColor(src_bgr, cv2.COLOR_BGR2GRAY)
+    gray2 = cv2.cvtColor(model_bgr, cv2.COLOR_BGR2GRAY)
     score, _ = ssim(gray1, gray2, full=True)
     return float(score)
 
 
-def _compute_lpips(source_path: str, rendered_path: str) -> float:
+def _compute_lpips(src_bgr: np.ndarray, model_bgr: np.ndarray) -> float:
     """
-    Compute LPIPS perceptual distance.
+    Compute LPIPS perceptual distance between two prepared BGR images.
     Falls back to a simpler perceptual metric if LPIPS is unavailable.
     """
     try:
@@ -167,12 +190,9 @@ def _compute_lpips(source_path: str, rendered_path: str) -> float:
 
         loss_fn = _get_lpips_model()
 
-        img1 = _load_and_prepare(source_path)
-        img2 = _load_and_prepare(rendered_path)
-
         # Convert BGR to RGB and normalize to [-1, 1]
-        t1 = torch.from_numpy(cv2.cvtColor(img1, cv2.COLOR_BGR2RGB)).permute(2, 0, 1).float() / 127.5 - 1.0
-        t2 = torch.from_numpy(cv2.cvtColor(img2, cv2.COLOR_BGR2RGB)).permute(2, 0, 1).float() / 127.5 - 1.0
+        t1 = torch.from_numpy(cv2.cvtColor(src_bgr, cv2.COLOR_BGR2RGB)).permute(2, 0, 1).float() / 127.5 - 1.0
+        t2 = torch.from_numpy(cv2.cvtColor(model_bgr, cv2.COLOR_BGR2RGB)).permute(2, 0, 1).float() / 127.5 - 1.0
 
         t1 = t1.unsqueeze(0)
         t2 = t2.unsqueeze(0)
@@ -184,16 +204,40 @@ def _compute_lpips(source_path: str, rendered_path: str) -> float:
 
     except ImportError:
         # Fallback: use normalized pixel-level difference as proxy
-        img1 = _load_and_prepare(source_path).astype(np.float32) / 255.0
-        img2 = _load_and_prepare(rendered_path).astype(np.float32) / 255.0
-        mse = np.mean((img1 - img2) ** 2)
+        a = src_bgr.astype(np.float32) / 255.0
+        b = model_bgr.astype(np.float32) / 255.0
+        mse = np.mean((a - b) ** 2)
         return float(np.clip(mse * 2, 0, 1))  # Scale to roughly match LPIPS range
 
 
-def _perceptual_comparison(source_path: str, rendered_path: str) -> dict:
-    """Run SSIM and LPIPS comparisons."""
-    ssim_val = _compute_ssim(source_path, rendered_path)
-    lpips_val = _compute_lpips(source_path, rendered_path)
+def _foreground_hist_similarity(src_bgr, src_mask, model_bgr, model_mask) -> float:
+    """
+    Alignment-robust 0-100 similarity: correlation of foreground LAB histograms
+    of two prepared BGR images + masks. Does not require pixel correspondence, so
+    it stays meaningful when the pose IoU is too low to trust SSIM/LPIPS.
+    """
+    def fg_lab_hist(bgr, mask):
+        m = (mask > 0).astype(np.uint8)
+        if m.sum() == 0:
+            m = np.ones(bgr.shape[:2], np.uint8)
+        lab = cv2.cvtColor(bgr, cv2.COLOR_BGR2LAB)
+        hists = []
+        for ch in range(3):
+            h = cv2.calcHist([lab], [ch], m, [64], [0, 256]).flatten()
+            h = h / (h.sum() + 1e-10)
+            hists.append(h.astype(np.float32))
+        return hists
+
+    hs = fg_lab_hist(src_bgr, src_mask)
+    hr = fg_lab_hist(model_bgr, model_mask)
+    corrs = [cv2.compareHist(a, b, cv2.HISTCMP_CORREL) for a, b in zip(hs, hr)]
+    return float(np.clip(np.mean(corrs) * 100.0, 0, 100))
+
+
+def _perceptual_comparison(src_bgr: np.ndarray, model_bgr: np.ndarray) -> dict:
+    """Run SSIM and LPIPS comparisons on prepared BGR image arrays."""
+    ssim_val = _compute_ssim(src_bgr, model_bgr)
+    lpips_val = _compute_lpips(src_bgr, model_bgr)
 
     # Convert to 0-100 scores
     ssim_score = ssim_val * 100  # SSIM is 0-1, higher is better
