@@ -7,11 +7,14 @@ pose estimator can search for the viewpoint that best matches the input image.
 
 import os
 import uuid
+import logging
 import numpy as np
 import trimesh
 from PIL import Image
 
 from services.mesh_cache import load_scene
+
+logger = logging.getLogger(__name__)
 
 
 # ──────────────── Public API ────────────────
@@ -58,9 +61,11 @@ def render_glb_from_pose(
     try:
         return _render_with_pyrender(scene, output_dir, resolution, camera_pose, suffix)
     except Exception:
+        logger.exception("pyrender render failed; falling back to trimesh")
         try:
             return _render_with_trimesh(scene, output_dir, resolution, camera_pose, suffix)
         except Exception:
+            logger.exception("trimesh render failed; falling back to analytic silhouette")
             meshes = _collect_meshes(scene)
             combined = trimesh.util.concatenate(meshes)
             return _render_silhouette(combined, output_dir, resolution, azimuth, elevation, suffix)
@@ -95,19 +100,35 @@ class PoseRenderer:
 
     def _setup(self):
         # Preferred: a single reusable pyrender offscreen renderer.
+        #
+        # Pose search only needs the SILHOUETTE (alpha mask), never the
+        # texture. Build the pyrender scene from geometry-only meshes so no
+        # texture is uploaded to the GL context. This is both faster and avoids
+        # the PyOpenGL glGenTextures crash that breaks textured uploads on some
+        # PyOpenGL/numpy combinations — which would otherwise fail every
+        # candidate render and force a silent fallback.
         try:
             import pyrender
 
             self._pyrender = pyrender
-            self._py_scene = pyrender.Scene.from_trimesh_scene(self.scene, bg_color=[0, 0, 0, 0])
+            self._py_scene = pyrender.Scene(bg_color=[0, 0, 0, 0])
+            for geom in _collect_meshes(self.scene):
+                bare = trimesh.Trimesh(
+                    vertices=geom.vertices, faces=geom.faces, process=False
+                )
+                self._py_scene.add(pyrender.Mesh.from_trimesh(bare, smooth=False))
             self._cam_node = self._py_scene.add(pyrender.PerspectiveCamera(yfov=np.pi / 3.0))
             self._light_node = self._py_scene.add(
                 pyrender.DirectionalLight(color=np.ones(3), intensity=3.0)
             )
             self._renderer = pyrender.OffscreenRenderer(*self.resolution)
+            # Render once now so a GL failure surfaces here (and we fall back to
+            # the analytic path) instead of silently failing every candidate.
+            self._mask_pyrender(0, 0)
             self._mode = "pyrender"
             return
         except Exception:
+            logger.exception("PoseRenderer pyrender setup failed; using silhouette projection")
             self._teardown_pyrender()
 
         # Fallback: analytic silhouette projection (pure numpy/cv2, no GL).

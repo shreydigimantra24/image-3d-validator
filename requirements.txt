@@ -17,6 +17,9 @@ kornia>=0.7.0
 # Mesh Processing
 trimesh[easy]>=4.0.0
 pyrender>=0.1.45
+# pyrender pins PyOpenGL==3.1.0, which crashes on glGenTextures under numpy>=2
+# (ctypes ArgumentError). 3.1.7+ restores numpy-2 compatibility. Override the pin.
+PyOpenGL>=3.1.7
 
 # Metrics
 scikit-image>=0.21.0
