@@ -1,10 +1,10 @@
-import { useState, useRef, useEffect } from 'react';
+import { useState, useRef } from 'react';
 import axios from 'axios';
 import './App.css';
 
 const API_BASE = '/api';
 
-function ScoreRing({ score, color, label, icon }) {
+function ScoreRing({ score, label }) {
   const radius = 42;
   const circumference = 2 * Math.PI * radius;
   const offset = circumference - (score / 100) * circumference;
@@ -15,7 +15,6 @@ function ScoreRing({ score, color, label, icon }) {
 
   return (
     <div className="score-card">
-      <div className="score-card__icon">{icon}</div>
       <div className="score-card__label">{label}</div>
       <div className="score-ring">
         <svg viewBox="0 0 100 100">
@@ -69,7 +68,7 @@ function PresenceChips({ presence }) {
     <div className="chip-row">
       {items.map(([label, ok]) => (
         <span className={`metric-chip ${ok ? 'chip-ok' : 'chip-bad'}`} key={label}>
-          {ok ? '✓' : '✕'} {label}
+          {label}: <strong>{ok ? 'yes' : 'no'}</strong>
         </span>
       ))}
     </div>
@@ -81,7 +80,7 @@ function GateChips({ gating }) {
   return (
     <div className="chip-row">
       {gating.applied_gates.map((g, i) => (
-        <span className="metric-chip chip-gate" key={i}>⚠ {g}</span>
+        <span className="metric-chip chip-gate" key={i}>{g}</span>
       ))}
     </div>
   );
@@ -124,7 +123,6 @@ function PerformancePanel({ timings }) {
   return (
     <div className="perf-panel">
       <div className="reason-card__header">
-        <span className="reason-card__icon">⏱️</span>
         <span className="reason-card__title">Performance ({total}s total)</span>
       </div>
       <div className="perf-bars">
@@ -145,381 +143,288 @@ function PerformancePanel({ timings }) {
   );
 }
 
+// Pipeline phases shown while processing
+const PHASES = ['Uploading image', 'Removing background', 'Uploading 3D model', 'Analyzing model'];
+
 function App() {
-  // State
+  // Selected inputs (both required before anything runs)
   const [imageFile, setImageFile] = useState(null);
   const [imagePreview, setImagePreview] = useState(null);
-  const [imagePath, setImagePath] = useState('');
-
-  const [bgRemovedUrl, setBgRemovedUrl] = useState(null);
-  const [bgRemovedPath, setBgRemovedPath] = useState('');
 
   const [glbFile, setGlbFile] = useState(null);
   const [glbUrl, setGlbUrl] = useState(null);
-  const [glbPath, setGlbPath] = useState('');
 
+  // Pipeline outputs
+  const [bgRemovedUrl, setBgRemovedUrl] = useState(null);
   const [renderedImageUrl, setRenderedImageUrl] = useState(null);
-
   const [validationResult, setValidationResult] = useState(null);
 
-  const [loading, setLoading] = useState({ upload: false, bgRemove: false, glbUpload: false, validate: false });
+  // Single combined run state
+  const [running, setRunning] = useState(false);
+  const [phase, setPhase] = useState(-1);
   const [status, setStatus] = useState({ type: '', message: '' });
 
   const imageInputRef = useRef(null);
   const glbInputRef = useRef(null);
 
-  // ─── Image Upload ───
-  const handleImageSelect = (e) => {
-    const file = e.target.files[0];
+  const bothReady = !!imageFile && !!glbFile;
+
+  // ─── Input selection ───
+  const pickImage = (file) => {
     if (!file) return;
     setImageFile(file);
     setImagePreview(URL.createObjectURL(file));
-    // Reset downstream state
-    setBgRemovedUrl(null);
-    setBgRemovedPath('');
-    setValidationResult(null);
-    setRenderedImageUrl(null);
-    setStatus({ type: '', message: '' });
+    resetOutputs();
   };
 
-  const uploadImage = async () => {
-    if (!imageFile) return;
-    setLoading((p) => ({ ...p, upload: true, bgRemove: true }));
-    setStatus({ type: 'info', message: 'Uploading image and removing background...' });
-
-    try {
-      // Step 1: Upload image
-      const formData = new FormData();
-      formData.append('file', imageFile);
-      const uploadRes = await axios.post(`${API_BASE}/upload/image`, formData);
-      const uploadedPath = uploadRes.data.data.filepath;
-      setImagePath(uploadedPath);
-
-      // Step 2: Remove background
-      const preprocessRes = await axios.post(`${API_BASE}/preprocess`, {
-        image_path: uploadedPath,
-      });
-      const bgResult = preprocessRes.data.data;
-      setBgRemovedPath(bgResult.output_path);
-      setBgRemovedUrl(bgResult.output_url);
-      setStatus({ type: 'success', message: 'Background removed successfully!' });
-    } catch (err) {
-      console.error(err);
-      setStatus({ type: 'error', message: `Failed: ${err.response?.data?.detail || err.message}` });
-    } finally {
-      setLoading((p) => ({ ...p, upload: false, bgRemove: false }));
-    }
-  };
-
-  // ─── GLB Upload ───
-  const handleGlbSelect = (e) => {
-    const file = e.target.files[0];
+  const pickGlb = (file) => {
     if (!file) return;
     setGlbFile(file);
     setGlbUrl(URL.createObjectURL(file));
-    setValidationResult(null);
+    resetOutputs();
+  };
+
+  const resetOutputs = () => {
+    setBgRemovedUrl(null);
     setRenderedImageUrl(null);
-  };
-
-  const uploadGlb = async () => {
-    if (!glbFile) return;
-    setLoading((p) => ({ ...p, glbUpload: true }));
-    setStatus({ type: 'info', message: 'Uploading 3D model...' });
-
-    try {
-      const formData = new FormData();
-      formData.append('file', glbFile);
-      const res = await axios.post(`${API_BASE}/upload/glb`, formData);
-      setGlbPath(res.data.data.filepath);
-      setStatus({ type: 'success', message: '3D model uploaded successfully!' });
-    } catch (err) {
-      console.error(err);
-      setStatus({ type: 'error', message: `GLB upload failed: ${err.response?.data?.detail || err.message}` });
-    } finally {
-      setLoading((p) => ({ ...p, glbUpload: false }));
-    }
-  };
-
-  // ─── Validate ───
-  const runValidation = async () => {
-    if (!bgRemovedPath || !glbPath) return;
-    setLoading((p) => ({ ...p, validate: true }));
-    setStatus({ type: 'info', message: 'Running validation — this may take a moment...' });
     setValidationResult(null);
-
-    try {
-      const res = await axios.post(`${API_BASE}/validate`, {
-        image_path: bgRemovedPath,
-        glb_path: glbPath,
-        original_image_path: imagePath,
-      });
-
-      const data = res.data.data;
-      setValidationResult(data);
-      setRenderedImageUrl(data.rendered_image_url);
-      setStatus({ type: 'success', message: 'Validation complete!' });
-    } catch (err) {
-      console.error(err);
-      setStatus({ type: 'error', message: `Validation failed: ${err.response?.data?.detail || err.message}` });
-    } finally {
-      setLoading((p) => ({ ...p, validate: false }));
-    }
+    setStatus({ type: '', message: '' });
+    setPhase(-1);
   };
 
-  // ─── Drag & Drop helpers ───
+  const handleImageSelect = (e) => pickImage(e.target.files[0]);
+  const handleGlbSelect = (e) => pickGlb(e.target.files[0]);
+
+  const clearImage = () => {
+    setImageFile(null);
+    setImagePreview(null);
+    resetOutputs();
+  };
+  const clearGlb = () => {
+    setGlbFile(null);
+    setGlbUrl(null);
+    resetOutputs();
+  };
+
+  // ─── Drag & Drop ───
   const handleDragOver = (e) => {
     e.preventDefault();
     e.currentTarget.classList.add('active');
   };
-  const handleDragLeave = (e) => {
-    e.currentTarget.classList.remove('active');
-  };
+  const handleDragLeave = (e) => e.currentTarget.classList.remove('active');
   const handleImageDrop = (e) => {
     e.preventDefault();
     e.currentTarget.classList.remove('active');
     const file = e.dataTransfer.files[0];
-    if (file && file.type.startsWith('image/')) {
-      setImageFile(file);
-      setImagePreview(URL.createObjectURL(file));
-      setBgRemovedUrl(null);
-      setValidationResult(null);
-    }
+    if (file && file.type.startsWith('image/')) pickImage(file);
   };
   const handleGlbDrop = (e) => {
     e.preventDefault();
     e.currentTarget.classList.remove('active');
     const file = e.dataTransfer.files[0];
-    if (file && (file.name.endsWith('.glb') || file.name.endsWith('.gltf'))) {
-      setGlbFile(file);
-      setGlbUrl(URL.createObjectURL(file));
-      setValidationResult(null);
+    if (file && (file.name.endsWith('.glb') || file.name.endsWith('.gltf'))) pickGlb(file);
+  };
+
+  // ─── Full pipeline — only runs when both inputs present ───
+  const runPipeline = async () => {
+    if (!bothReady || running) return;
+    setRunning(true);
+    setValidationResult(null);
+    setBgRemovedUrl(null);
+    setRenderedImageUrl(null);
+
+    try {
+      // 1. Upload image
+      setPhase(0);
+      setStatus({ type: 'info', message: PHASES[0] });
+      const imgForm = new FormData();
+      imgForm.append('file', imageFile);
+      const uploadRes = await axios.post(`${API_BASE}/upload/image`, imgForm);
+      const uploadedPath = uploadRes.data.data.filepath;
+
+      // 2. Remove background
+      setPhase(1);
+      setStatus({ type: 'info', message: PHASES[1] });
+      const preprocessRes = await axios.post(`${API_BASE}/preprocess`, { image_path: uploadedPath });
+      const bgResult = preprocessRes.data.data;
+      setBgRemovedUrl(bgResult.output_url);
+
+      // 3. Upload GLB
+      setPhase(2);
+      setStatus({ type: 'info', message: PHASES[2] });
+      const glbForm = new FormData();
+      glbForm.append('file', glbFile);
+      const glbRes = await axios.post(`${API_BASE}/upload/glb`, glbForm);
+      const glbPath = glbRes.data.data.filepath;
+
+      // 4. Validate
+      setPhase(3);
+      setStatus({ type: 'info', message: PHASES[3] });
+      const res = await axios.post(`${API_BASE}/validate`, {
+        image_path: bgResult.output_path,
+        glb_path: glbPath,
+        original_image_path: uploadedPath,
+      });
+      const data = res.data.data;
+      setValidationResult(data);
+      setRenderedImageUrl(data.rendered_image_url);
+      setStatus({ type: 'success', message: 'Validation complete' });
+      setPhase(-1);
+    } catch (err) {
+      console.error(err);
+      setStatus({ type: 'error', message: `Failed: ${err.response?.data?.detail || err.message}` });
+      setPhase(-1);
+    } finally {
+      setRunning(false);
     }
   };
 
   return (
     <div className="app">
-      {/* Header */}
       <header className="header">
-        <div className="header__badge">
-          <span className="header__badge-dot" />
-          AI-Powered Pipeline
-        </div>
-        <h1>Image → 3D Validator</h1>
-        <p>Validate 3D models against source product images with precision scoring</p>
+        <h1>Image to 3D Validator</h1>
+        <p>Compare a 3D model against its source product image with precision scoring</p>
       </header>
 
       <div className="steps">
-        {/* ───────── Step 1: Upload Image ───────── */}
-        <section className="step-section" id="step-upload-image">
+        {/* ───────── Inputs — both required ───────── */}
+        <section className="step-section">
           <div className="step-header">
             <div className="step-number">1</div>
             <div>
-              <div className="step-title">Upload Product Image</div>
-              <div className="step-subtitle">JPEG, PNG, or WebP — the source for validation</div>
+              <div className="step-title">Add your files</div>
+              <div className="step-subtitle">A product image and a 3D model are both required to begin</div>
             </div>
           </div>
 
-          {!imagePreview ? (
-            <div
-              className="upload-zone"
-              onClick={() => imageInputRef.current?.click()}
-              onDragOver={handleDragOver}
-              onDragLeave={handleDragLeave}
-              onDrop={handleImageDrop}
-            >
-              <input ref={imageInputRef} type="file" accept="image/*" onChange={handleImageSelect} />
-              <div className="upload-zone__icon">📸</div>
-              <div className="upload-zone__text">
-                <strong>Click to upload</strong> or drag & drop
-              </div>
-              <div className="upload-zone__hint">JPG, PNG, WebP up to 50MB</div>
-            </div>
-          ) : (
-            <>
-              <div className="image-grid">
-                <div className="image-preview">
-                  <div className="image-preview__label">Original Image</div>
-                  <img src={imagePreview} alt="Original product" />
-                </div>
-                <div className="image-preview">
-                  <div className="image-preview__label">Background Removed</div>
-                  {bgRemovedUrl ? (
-                    <img src={bgRemovedUrl} alt="Background removed" />
-                  ) : (
-                    <div style={{ height: 280, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--text-muted)' }}>
-                      {loading.bgRemove ? (
-                        <div className="loading-overlay">
-                          <div className="spinner" />
-                          Removing background...
-                        </div>
-                      ) : (
-                        'Click "Process Image" to remove background'
-                      )}
-                    </div>
-                  )}
-                </div>
-              </div>
-
-              <div className="btn-group">
-                <button className="btn btn-primary" onClick={uploadImage} disabled={loading.upload || loading.bgRemove}>
-                  {loading.upload || loading.bgRemove ? (
-                    <>
-                      <div className="spinner" style={{ width: 16, height: 16, borderWidth: 2 }} />
-                      Processing...
-                    </>
-                  ) : (
-                    '🚀 Process Image'
-                  )}
-                </button>
-                <button
-                  className="btn btn-secondary"
-                  onClick={() => {
-                    setImageFile(null);
-                    setImagePreview(null);
-                    setBgRemovedUrl(null);
-                    setImagePath('');
-                    setBgRemovedPath('');
-                    setValidationResult(null);
-                  }}
+          <div className="input-grid">
+            {/* Image input */}
+            <div className="input-col">
+              <div className="input-col__title">Product image</div>
+              {!imagePreview ? (
+                <div
+                  className="upload-zone"
+                  onClick={() => imageInputRef.current?.click()}
+                  onDragOver={handleDragOver}
+                  onDragLeave={handleDragLeave}
+                  onDrop={handleImageDrop}
                 >
-                  ✕ Clear
-                </button>
-              </div>
-            </>
+                  <input ref={imageInputRef} type="file" accept="image/*" onChange={handleImageSelect} />
+                  <div className="upload-zone__text">
+                    <strong>Click to upload</strong> or drag &amp; drop
+                  </div>
+                  <div className="upload-zone__hint">JPG, PNG or WebP, up to 50MB</div>
+                </div>
+              ) : (
+                <div className="preview-frame">
+                  <div className="image-preview">
+                    <div className="image-preview__label">Selected image</div>
+                    <img src={imagePreview} alt="Selected product" />
+                  </div>
+                  <button className="btn btn-ghost btn-sm" onClick={clearImage} disabled={running}>
+                    Replace
+                  </button>
+                </div>
+              )}
+            </div>
+
+            {/* GLB input */}
+            <div className="input-col">
+              <div className="input-col__title">3D model</div>
+              {!glbUrl ? (
+                <div
+                  className="upload-zone"
+                  onClick={() => glbInputRef.current?.click()}
+                  onDragOver={handleDragOver}
+                  onDragLeave={handleDragLeave}
+                  onDrop={handleGlbDrop}
+                >
+                  <input ref={glbInputRef} type="file" accept=".glb,.gltf" onChange={handleGlbSelect} />
+                  <div className="upload-zone__text">
+                    <strong>Click to upload</strong> or drag &amp; drop
+                  </div>
+                  <div className="upload-zone__hint">GLB or glTF format</div>
+                </div>
+              ) : (
+                <div className="preview-frame">
+                  <div className="viewer-container">
+                    <model-viewer
+                      src={glbUrl}
+                      alt="3D model preview"
+                      auto-rotate
+                      camera-controls
+                      shadow-intensity="1"
+                      environment-image="neutral"
+                      style={{ width: '100%', height: '100%' }}
+                    />
+                  </div>
+                  <button className="btn btn-ghost btn-sm" onClick={clearGlb} disabled={running}>
+                    Replace
+                  </button>
+                </div>
+              )}
+            </div>
+          </div>
+
+          <button className="btn btn-primary btn-run" onClick={runPipeline} disabled={!bothReady || running}>
+            {running ? (
+              <>
+                <div className="spinner" style={{ width: 18, height: 18, borderWidth: 2 }} />
+                {PHASES[phase] || 'Working'}…
+              </>
+            ) : bothReady ? (
+              'Run validation'
+            ) : (
+              'Add both files to continue'
+            )}
+          </button>
+
+          {running && (
+            <div className="phase-track">
+              {PHASES.map((p, i) => (
+                <div
+                  key={p}
+                  className={`phase-step ${i < phase ? 'done' : ''} ${i === phase ? 'active' : ''}`}
+                >
+                  <span className="phase-dot" />
+                  <span className="phase-name">{p}</span>
+                </div>
+              ))}
+            </div>
           )}
         </section>
 
-        {/* ───────── Step 2: Upload GLB ───────── */}
-        {bgRemovedUrl && (
-          <section className="step-section" id="step-upload-glb">
+        {/* ───────── Results ───────── */}
+        {validationResult && (
+          <section className="step-section">
             <div className="step-header">
               <div className="step-number">2</div>
               <div>
-                <div className="step-title">Upload 3D Model</div>
-                <div className="step-subtitle">GLB or glTF format</div>
-              </div>
-            </div>
-
-            {!glbUrl ? (
-              <div
-                className="upload-zone"
-                onClick={() => glbInputRef.current?.click()}
-                onDragOver={handleDragOver}
-                onDragLeave={handleDragLeave}
-                onDrop={handleGlbDrop}
-              >
-                <input ref={glbInputRef} type="file" accept=".glb,.gltf" onChange={handleGlbSelect} />
-                <div className="upload-zone__icon">🧊</div>
-                <div className="upload-zone__text">
-                  <strong>Click to upload</strong> or drag & drop a GLB file
-                </div>
-                <div className="upload-zone__hint">.glb or .gltf format</div>
-              </div>
-            ) : (
-              <>
-                <div className="viewer-container">
-                  <model-viewer
-                    src={glbUrl}
-                    alt="3D Model Preview"
-                    auto-rotate
-                    camera-controls
-                    shadow-intensity="1"
-                    environment-image="neutral"
-                    style={{ width: '100%', height: '100%' }}
-                  />
-                </div>
-
-                <div className="btn-group">
-                  <button className="btn btn-primary" onClick={uploadGlb} disabled={loading.glbUpload || !!glbPath}>
-                    {loading.glbUpload ? (
-                      <>
-                        <div className="spinner" style={{ width: 16, height: 16, borderWidth: 2 }} />
-                        Uploading...
-                      </>
-                    ) : glbPath ? (
-                      '✓ Model Uploaded'
-                    ) : (
-                      '📤 Upload Model'
-                    )}
-                  </button>
-                  <button
-                    className="btn btn-secondary"
-                    onClick={() => {
-                      setGlbFile(null);
-                      setGlbUrl(null);
-                      setGlbPath('');
-                      setValidationResult(null);
-                    }}
-                  >
-                    ✕ Clear Model
-                  </button>
-                </div>
-              </>
-            )}
-          </section>
-        )}
-
-        {/* ───────── Step 3: Validate ───────── */}
-        {bgRemovedUrl && glbPath && (
-          <section className="step-section" id="step-validate">
-            <div className="step-header">
-              <div className="step-number">3</div>
-              <div>
-                <div className="step-title">Run Validation</div>
-                <div className="step-subtitle">Geometry, Texture & Color analysis</div>
-              </div>
-            </div>
-
-            <button
-              className="btn btn-primary btn-validate"
-              onClick={runValidation}
-              disabled={loading.validate}
-            >
-              {loading.validate ? (
-                <>
-                  <div className="spinner" style={{ width: 18, height: 18, borderWidth: 2 }} />
-                  Analyzing model — please wait...
-                </>
-              ) : (
-                '⚡ Validate 3D Model'
-              )}
-            </button>
-          </section>
-        )}
-
-        {/* ───────── Step 4: Results ───────── */}
-        {validationResult && (
-          <section className="step-section" id="step-results">
-            <div className="step-header">
-              <div className="step-number">4</div>
-              <div>
-                <div className="step-title">Validation Results</div>
+                <div className="step-title">Validation results</div>
                 <div className="step-subtitle">Detailed scoring and analysis</div>
               </div>
             </div>
 
-            {/* ── Validation Evidence (Enhancement 2) ── */}
             {validationResult.evidence && (
               <div className="evidence-panel">
                 <div className="evidence-panel__header">
-                  <span className="reason-card__icon">🔍</span>
-                  <span className="reason-card__title">Validation Evidence</span>
+                  <span className="reason-card__title">Validation evidence</span>
                   {validationResult.alignment && (
                     <span className="alignment-badge">
                       Pose az {validationResult.alignment.azimuth}° / el {validationResult.alignment.elevation}°
                       {' · '}IoU {validationResult.alignment.iou}
                       {' · '}conf {Math.round((validationResult.alignment.confidence || 0) * 100)}%
-                      {validationResult.alignment.fallback ? ' · ⚠ fallback' : ''}
+                      {validationResult.alignment.fallback ? ' · fallback' : ''}
                     </span>
                   )}
                 </div>
                 <div className="evidence-grid">
                   <div className="image-preview">
-                    <div className="image-preview__label">Source (BG Removed)</div>
+                    <div className="image-preview__label">Source (background removed)</div>
                     <img src={validationResult.evidence.source_url || bgRemovedUrl} alt="Source" />
                   </div>
                   <div className="image-preview">
-                    <div className="image-preview__label">Aligned Render</div>
+                    <div className="image-preview__label">Aligned render</div>
                     <img src={validationResult.evidence.aligned_render_url || renderedImageUrl} alt="Aligned render" />
                   </div>
                   <div className="image-preview">
@@ -534,31 +439,16 @@ function App() {
               </div>
             )}
 
-            {/* Score Cards */}
             <div className="scores-grid">
-              <ScoreRing
-                score={validationResult.geometry.score}
-                label="Geometry"
-                icon="📐"
-              />
-              <ScoreRing
-                score={validationResult.texture.score}
-                label="Texture"
-                icon="🎨"
-              />
-              <ScoreRing
-                score={validationResult.color.score}
-                label="Color"
-                icon="🌈"
-              />
+              <ScoreRing score={validationResult.geometry.score} label="Geometry" />
+              <ScoreRing score={validationResult.texture.score} label="Texture" />
+              <ScoreRing score={validationResult.color.score} label="Color" />
             </div>
 
-            {/* Detailed Reasons */}
             <div className="reasons-section">
               <div className="reason-card">
                 <div className="reason-card__header">
-                  <span className="reason-card__icon">📐</span>
-                  <span className="reason-card__title">Geometry Analysis</span>
+                  <span className="reason-card__title">Geometry analysis</span>
                 </div>
                 <p className="reason-card__text">{validationResult.geometry.reason}</p>
                 <QualityChips quality={validationResult.geometry.details?.quality_checks} />
@@ -567,8 +457,7 @@ function App() {
 
               <div className="reason-card">
                 <div className="reason-card__header">
-                  <span className="reason-card__icon">🎨</span>
-                  <span className="reason-card__title">Texture Analysis</span>
+                  <span className="reason-card__title">Texture analysis</span>
                 </div>
                 <p className="reason-card__text">{validationResult.texture.reason}</p>
                 <PresenceChips presence={validationResult.texture.details?.presence_checks} />
@@ -577,27 +466,20 @@ function App() {
 
               <div className="reason-card">
                 <div className="reason-card__header">
-                  <span className="reason-card__icon">🌈</span>
-                  <span className="reason-card__title">Color Analysis</span>
+                  <span className="reason-card__title">Color analysis</span>
                 </div>
                 <p className="reason-card__text">{validationResult.color.reason}</p>
                 <DominantPalettes dominant={validationResult.color.details?.dominant_color} />
               </div>
             </div>
 
-            {/* ── Performance Monitoring (Enhancement 6) ── */}
-            {validationResult.performance && (
-              <PerformancePanel timings={validationResult.performance} />
-            )}
+            {validationResult.performance && <PerformancePanel timings={validationResult.performance} />}
           </section>
         )}
 
-        {/* Status Bar */}
         {status.message && (
           <div className={`status-message ${status.type}`}>
             {status.type === 'info' && <div className="spinner" style={{ width: 16, height: 16, borderWidth: 2 }} />}
-            {status.type === 'success' && '✅'}
-            {status.type === 'error' && '❌'}
             {status.message}
           </div>
         )}
