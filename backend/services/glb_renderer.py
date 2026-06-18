@@ -123,6 +123,13 @@ class PoseRenderer:
         self._renderer = None
         self._tri_scene = None
         self._combined = None
+        # Lazily-built TEXTURED scene for RGB re-ranking (Phase 2/3). Built only
+        # when rgb_at() is first called so the silhouette search stays cheap.
+        self._rgb_scene = None
+        self._rgb_camera = None
+        self._rgb_cam_node = None
+        self._rgb_light_node = None
+        self._rgb_ready = None   # None=untried, True=ok, False=unavailable
         self._setup()
 
     def _setup(self):
@@ -217,6 +224,76 @@ class PoseRenderer:
             cv2.fillConvexPoly(mask, tri, 255)
         return mask
 
+    # ── Textured RGB rendering (Phase 2/3: appearance re-ranking) ──
+
+    def rgb_at(
+        self,
+        azimuth: float,
+        elevation: float,
+        distance: float = None,
+        fov_deg: float = None,
+        offset_x: float = 0.0,
+        offset_y: float = 0.0,
+    ):
+        """
+        Render a TEXTURED RGB image (composited over white) + its alpha mask at
+        the given pose. Returns (rgb_uint8_HxWx3, mask_uint8_HxW) or (None, None)
+        if textured rendering is unavailable on this host (silhouette-only mode
+        or a GL texture-upload failure) — callers then skip visual re-ranking.
+
+        Reuses the single offscreen renderer and the one cached GLB scene, so no
+        extra model load and no per-candidate files.
+        """
+        if self._mode != "pyrender" or self._rgb_ready is False:
+            return None, None
+        if self._rgb_scene is None and not self._build_rgb_scene():
+            return None, None
+
+        fov_deg = self.fov_deg if fov_deg is None else fov_deg
+        if abs(self._rgb_camera.yfov - np.radians(fov_deg)) > 1e-6:
+            self._rgb_camera.yfov = np.radians(fov_deg)
+        pose = _camera_pose_for(
+            self.scene, azimuth, elevation, distance=distance,
+            offset_x=offset_x, offset_y=offset_y,
+        )
+        self._rgb_scene.set_pose(self._rgb_cam_node, pose)
+        self._rgb_scene.set_pose(self._rgb_light_node, pose)
+        try:
+            color, _ = self._renderer.render(
+                self._rgb_scene, flags=self._pyrender.RenderFlags.RGBA
+            )
+        except Exception:
+            logger.exception("textured RGB render failed; disabling visual re-rank")
+            self._rgb_ready = False
+            return None, None
+
+        rgb = color[:, :, :3].astype(np.float32)
+        alpha = (color[:, :, 3].astype(np.float32) / 255.0)[..., None]
+        over_white = (rgb * alpha + 255.0 * (1.0 - alpha)).astype(np.uint8)
+        mask = (color[:, :, 3] > 16).astype(np.uint8) * 255
+        return over_white, mask
+
+    def _build_rgb_scene(self) -> bool:
+        """Build the textured pyrender scene once. Returns False if it fails."""
+        try:
+            py = self._pyrender
+            scene = py.Scene.from_trimesh_scene(self.scene, bg_color=[0, 0, 0, 0])
+            self._rgb_camera = py.PerspectiveCamera(yfov=np.radians(self.fov_deg))
+            self._rgb_cam_node = scene.add(self._rgb_camera)
+            # Key light follows the camera; a dim fixed fill keeps far faces lit.
+            self._rgb_light_node = scene.add(
+                py.DirectionalLight(color=np.ones(3), intensity=3.0)
+            )
+            scene.add(py.DirectionalLight(color=np.ones(3), intensity=1.0))
+            self._rgb_scene = scene
+            self._rgb_ready = True
+            return True
+        except Exception:
+            logger.exception("textured RGB scene build failed; visual re-rank disabled")
+            self._rgb_ready = False
+            self._rgb_scene = None
+            return False
+
     def _teardown_pyrender(self):
         try:
             if self._renderer is not None:
@@ -225,6 +302,7 @@ class PoseRenderer:
             pass
         self._renderer = None
         self._py_scene = None
+        self._rgb_scene = None
 
     def close(self):
         self._teardown_pyrender()
