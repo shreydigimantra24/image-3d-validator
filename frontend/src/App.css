@@ -581,6 +581,36 @@
   border: 1px solid var(--border-color);
 }
 
+.mismatch-error {
+  display: flex;
+  gap: 16px;
+  align-items: flex-start;
+  margin-bottom: 20px;
+  padding: 22px 24px;
+  border-radius: 14px;
+  background: rgba(220, 38, 38, 0.08);
+  border: 1.5px solid rgba(220, 38, 38, 0.45);
+}
+
+.mismatch-error__icon {
+  font-size: 2rem;
+  line-height: 1;
+  color: #dc2626;
+}
+
+.mismatch-error__title {
+  font-size: 1.25rem;
+  font-weight: 700;
+  color: #b91c1c;
+  margin-bottom: 6px;
+}
+
+.mismatch-error__text {
+  font-size: 0.95rem;
+  line-height: 1.55;
+  color: var(--text-secondary, #555);
+}
+
 .evidence-grid {
   display: grid;
   grid-template-columns: repeat(3, 1fr);

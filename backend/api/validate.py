@@ -32,7 +32,11 @@ from services.dominant_color import analyze_dominant_colors, dominant_color_scor
 from services.material_inspector import inspect_material, get_albedo_rgb
 from services.evidence_generator import generate_overlay
 from services.reason_generator import generate_reasons
-from services.validation_config import IOU_TRUST_THRESHOLD
+from services.validation_config import (
+    IOU_TRUST_THRESHOLD,
+    MISMATCH_IOU_HARD,
+    object_match_factor,
+)
 
 router = APIRouter()
 
@@ -68,6 +72,52 @@ async def validate_model(request: ValidateRequest):
         align_iou = pose.get("iou")
         align_trusted = align_iou is not None and float(align_iou) >= IOU_TRUST_THRESHOLD
         timings["alignment"] = round(time.perf_counter() - t0, 3)
+
+        # ── Step 1b: Hard object-mismatch SHORT-CIRCUIT (Fix 5) ──
+        # If the model's silhouette never matched the photo at any searched pose,
+        # the two are different objects. Do NOT score or reason about a wrong
+        # pair — that would be meaningless. Return immediately with a clear
+        # "these don't match" verdict and the alignment evidence as proof.
+        mismatch_iou = float(align_iou) if align_iou is not None else 0.0
+        if align_iou is not None and mismatch_iou < MISMATCH_IOU_HARD:
+            try:
+                overlay = generate_overlay(request.image_path, aligned_render_path, OUTPUT_DIR)
+            except Exception:
+                overlay = {"overlay_url": None}
+            timings["total"] = round(time.perf_counter() - t_start, 3)
+            return {
+                "status": "mismatch",
+                "data": {
+                    "mismatch": True,
+                    "object_mismatch": {
+                        "detected": True,
+                        "alignment_iou": round(mismatch_iou, 4),
+                        "iou_threshold": MISMATCH_IOU_HARD,
+                        "title": "These don't match",
+                        "message": (
+                            f"The 3D model and the product image appear to be completely "
+                            f"different objects. The model's silhouette only reached "
+                            f"{round(mismatch_iou * 100)}% overlap with the photo at its "
+                            f"best-matching pose (below the {round(MISMATCH_IOU_HARD * 100)}% "
+                            f"minimum), so no quality scoring was performed. Check that you "
+                            f"uploaded the correct image + model pair and try again."
+                        ),
+                    },
+                    "alignment": {
+                        "azimuth": pose["azimuth"],
+                        "elevation": pose["elevation"],
+                        "iou": pose["iou"],
+                        "confidence": pose["confidence"],
+                        "fallback": pose.get("fallback", False),
+                    },
+                    "evidence": {
+                        "source_url": _to_url(request.image_path),
+                        "aligned_render_url": pose["aligned_render_url"],
+                        "overlay_url": overlay.get("overlay_url"),
+                    },
+                    "performance": timings,
+                },
+            }
 
         # ── Step 2: Geometry validation (asset-class aware, render-first) ──
         t0 = time.perf_counter()
@@ -134,6 +184,16 @@ async def validate_model(request: ValidateRequest):
         using_albedo = albedo_rgb is not None and albedo_rgb.size > 0
         color_conf = 0.95 if using_albedo else (geometry_conf if align_trusted else round(geometry_conf * 0.6, 3))
         timings["color"] = round(time.perf_counter() - t0, 3)
+
+        # ── Step 4b: Object-match scaling (Fix 5) ──
+        # A clear mismatch (IoU < MISMATCH_IOU_HARD) already short-circuited above.
+        # Here the IoU cleared that bar but may still be only a moderate match, so
+        # we scale every category by a continuous match factor (1.0 at full trust →
+        # lower as overlap weakens) so the scores reflect how well the shape agreed.
+        match_factor = object_match_factor(align_iou)
+        geometry_score = round(geometry_score * match_factor, 1)
+        texture_score = round(texture_score * match_factor, 1)
+        color_score = round(color_score * match_factor, 1)
 
         # ── Step 5: Aggregate scores ──
         scores = {

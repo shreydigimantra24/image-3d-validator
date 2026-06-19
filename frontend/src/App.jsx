@@ -82,6 +82,27 @@ function PresenceChips({ presence }) {
   );
 }
 
+function TextureCues({ perceptual }) {
+  if (!perceptual) return null;
+  const items = [
+    ['Color match', perceptual.histogram_similarity],
+    ['Pattern match', perceptual.texture_pattern_similarity],
+    ['LPIPS', perceptual.lpips_score],
+    ['SSIM', perceptual.ssim_score],
+    ['Appearance', perceptual.appearance_score],
+  ].filter(([, v]) => v !== undefined && v !== null);
+  if (!items.length) return null;
+  return (
+    <div className="chip-row">
+      {items.map(([label, v]) => (
+        <span className="metric-chip" key={label}>
+          {label}: <strong>{Math.round(v)}</strong>
+        </span>
+      ))}
+    </div>
+  );
+}
+
 function GateChips({ gating }) {
   if (!gating || !gating.gated) return null;
   return (
@@ -408,79 +429,132 @@ function App() {
               <div className="step-number">2</div>
               <div>
                 <div className="step-title">Validation results</div>
-                <div className="step-subtitle">Detailed scoring and analysis</div>
+                <div className="step-subtitle">
+                  {validationResult.mismatch ? 'Image and model do not match' : 'Detailed scoring and analysis'}
+                </div>
               </div>
             </div>
 
-            {validationResult.evidence && (
-              <div className="evidence-panel">
-                <div className="evidence-panel__header">
-                  <span className="reason-card__title">Validation evidence</span>
-                  {validationResult.alignment && (
-                    <span className="alignment-badge">
-                      Pose az {validationResult.alignment.azimuth}° / el {validationResult.alignment.elevation}°
-                      {' · '}IoU {validationResult.alignment.iou}
-                      {' · '}conf {Math.round((validationResult.alignment.confidence || 0) * 100)}%
-                      {validationResult.alignment.fallback ? ' · fallback' : ''}
-                    </span>
-                  )}
-                </div>
-                <div className="evidence-grid">
-                  <div className="image-preview">
-                    <div className="image-preview__label">Source (background removed)</div>
-                    <img src={asset(validationResult.evidence.source_url || bgRemovedUrl)} alt="Source" />
-                  </div>
-                  <div className="image-preview">
-                    <div className="image-preview__label">Aligned render</div>
-                    <img src={asset(validationResult.evidence.aligned_render_url || renderedImageUrl)} alt="Aligned render" />
-                  </div>
-                  <div className="image-preview">
-                    <div className="image-preview__label">Overlay</div>
-                    {validationResult.evidence.overlay_url ? (
-                      <img src={asset(validationResult.evidence.overlay_url)} alt="Overlay comparison" />
-                    ) : (
-                      <div className="evidence-empty">Overlay unavailable</div>
-                    )}
+            {validationResult.mismatch ? (
+              /* Totally different image + model: NO scoring, NO reasoning. */
+              <>
+                <div className="mismatch-error">
+                  <span className="mismatch-error__icon">⚠</span>
+                  <div>
+                    <div className="mismatch-error__title">
+                      {validationResult.object_mismatch?.title || "These don't match"}
+                    </div>
+                    <div className="mismatch-error__text">
+                      {validationResult.object_mismatch?.message}
+                    </div>
                   </div>
                 </div>
-              </div>
+
+                {validationResult.evidence && (
+                  <div className="evidence-panel">
+                    <div className="evidence-panel__header">
+                      <span className="reason-card__title">Why we flagged this</span>
+                      {validationResult.alignment && (
+                        <span className="alignment-badge">
+                          best IoU {validationResult.alignment.iou} (need ≥ {validationResult.object_mismatch?.iou_threshold})
+                        </span>
+                      )}
+                    </div>
+                    <div className="evidence-grid">
+                      <div className="image-preview">
+                        <div className="image-preview__label">Your image</div>
+                        <img src={asset(validationResult.evidence.source_url || bgRemovedUrl)} alt="Source" />
+                      </div>
+                      <div className="image-preview">
+                        <div className="image-preview__label">Model (best-fit pose)</div>
+                        <img src={asset(validationResult.evidence.aligned_render_url || renderedImageUrl)} alt="Aligned render" />
+                      </div>
+                      <div className="image-preview">
+                        <div className="image-preview__label">Overlay</div>
+                        {validationResult.evidence.overlay_url ? (
+                          <img src={asset(validationResult.evidence.overlay_url)} alt="Overlay comparison" />
+                        ) : (
+                          <div className="evidence-empty">Overlay unavailable</div>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </>
+            ) : (
+              <>
+                {validationResult.evidence && (
+                  <div className="evidence-panel">
+                    <div className="evidence-panel__header">
+                      <span className="reason-card__title">Validation evidence</span>
+                      {validationResult.alignment && (
+                        <span className="alignment-badge">
+                          Pose az {validationResult.alignment.azimuth}° / el {validationResult.alignment.elevation}°
+                          {' · '}IoU {validationResult.alignment.iou}
+                          {' · '}conf {Math.round((validationResult.alignment.confidence || 0) * 100)}%
+                          {validationResult.alignment.fallback ? ' · fallback' : ''}
+                        </span>
+                      )}
+                    </div>
+                    <div className="evidence-grid">
+                      <div className="image-preview">
+                        <div className="image-preview__label">Source (background removed)</div>
+                        <img src={asset(validationResult.evidence.source_url || bgRemovedUrl)} alt="Source" />
+                      </div>
+                      <div className="image-preview">
+                        <div className="image-preview__label">Aligned render</div>
+                        <img src={asset(validationResult.evidence.aligned_render_url || renderedImageUrl)} alt="Aligned render" />
+                      </div>
+                      <div className="image-preview">
+                        <div className="image-preview__label">Overlay</div>
+                        {validationResult.evidence.overlay_url ? (
+                          <img src={asset(validationResult.evidence.overlay_url)} alt="Overlay comparison" />
+                        ) : (
+                          <div className="evidence-empty">Overlay unavailable</div>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                <div className="scores-grid">
+                  <ScoreRing score={validationResult.geometry.score} label="Geometry" />
+                  <ScoreRing score={validationResult.texture.score} label="Texture" />
+                  <ScoreRing score={validationResult.color.score} label="Color" />
+                </div>
+
+                <div className="reasons-section">
+                  <div className="reason-card">
+                    <div className="reason-card__header">
+                      <span className="reason-card__title">Geometry analysis</span>
+                    </div>
+                    <p className="reason-card__text">{validationResult.geometry.reason}</p>
+                    <QualityChips quality={validationResult.geometry.details?.quality_checks} />
+                    <GateChips gating={validationResult.geometry.details?.gating} />
+                  </div>
+
+                  <div className="reason-card">
+                    <div className="reason-card__header">
+                      <span className="reason-card__title">Texture analysis</span>
+                    </div>
+                    <p className="reason-card__text">{validationResult.texture.reason}</p>
+                    <TextureCues perceptual={validationResult.texture.details?.perceptual} />
+                    <PresenceChips presence={validationResult.texture.details?.presence_checks} />
+                    <GateChips gating={validationResult.texture.details?.gating} />
+                  </div>
+
+                  <div className="reason-card">
+                    <div className="reason-card__header">
+                      <span className="reason-card__title">Color analysis</span>
+                    </div>
+                    <p className="reason-card__text">{validationResult.color.reason}</p>
+                    <DominantPalettes dominant={validationResult.color.details?.dominant_color} />
+                  </div>
+                </div>
+
+                {validationResult.performance && <PerformancePanel timings={validationResult.performance} />}
+              </>
             )}
-
-            <div className="scores-grid">
-              <ScoreRing score={validationResult.geometry.score} label="Geometry" />
-              <ScoreRing score={validationResult.texture.score} label="Texture" />
-              <ScoreRing score={validationResult.color.score} label="Color" />
-            </div>
-
-            <div className="reasons-section">
-              <div className="reason-card">
-                <div className="reason-card__header">
-                  <span className="reason-card__title">Geometry analysis</span>
-                </div>
-                <p className="reason-card__text">{validationResult.geometry.reason}</p>
-                <QualityChips quality={validationResult.geometry.details?.quality_checks} />
-                <GateChips gating={validationResult.geometry.details?.gating} />
-              </div>
-
-              <div className="reason-card">
-                <div className="reason-card__header">
-                  <span className="reason-card__title">Texture analysis</span>
-                </div>
-                <p className="reason-card__text">{validationResult.texture.reason}</p>
-                <PresenceChips presence={validationResult.texture.details?.presence_checks} />
-                <GateChips gating={validationResult.texture.details?.gating} />
-              </div>
-
-              <div className="reason-card">
-                <div className="reason-card__header">
-                  <span className="reason-card__title">Color analysis</span>
-                </div>
-                <p className="reason-card__text">{validationResult.color.reason}</p>
-                <DominantPalettes dominant={validationResult.color.details?.dominant_color} />
-              </div>
-            </div>
-
-            {validationResult.performance && <PerformancePanel timings={validationResult.performance} />}
           </section>
         )}
 

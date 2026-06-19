@@ -16,6 +16,7 @@ def generate_reasons(
     alignment: dict = None,
     confidences: dict = None,
     material: dict = None,
+    object_mismatch: dict = None,
 ) -> dict:
     """
     Generate human-readable explanations for validation scores using Groq LLM.
@@ -27,6 +28,9 @@ def generate_reasons(
             plus the 'debug' block produced by the pose estimator).
         confidences: optional per-score confidence + alignment trust flags (Fix 4).
         material: optional material inspection result with warnings (Fix 3).
+        object_mismatch: optional wrong-model gate result (Fix 5). When present
+            (detected=True) every reason is prefixed with a clear mismatch notice
+            and the scores reflect the applied cap.
 
     Returns:
         dict with 'geometry_reason', 'texture_reason', 'color_reason'.
@@ -34,16 +38,37 @@ def generate_reasons(
     confidences = confidences or {}
     material = material or {}
     try:
-        return _generate_with_groq(scores, details, alignment, confidences, material)
+        reasons = _generate_with_groq(
+            scores, details, alignment, confidences, material, object_mismatch
+        )
     except Exception as e:
         # Fallback: generate template-based reasons
         print(f"Groq LLM unavailable, using template fallback: {e}")
-        return _generate_template_reasons(scores, details, alignment, confidences, material)
+        reasons = _generate_template_reasons(
+            scores, details, alignment, confidences, material
+        )
+    return _apply_mismatch_notice(reasons, object_mismatch)
+
+
+def _apply_mismatch_notice(reasons: dict, object_mismatch: dict = None) -> dict:
+    """Prefix every reason with the wrong-model notice when a mismatch is gated.
+
+    Applied AFTER reason generation so it holds regardless of the LLM/template
+    path — the user must see the mismatch verdict no matter which ran.
+    """
+    if not object_mismatch or not object_mismatch.get("detected"):
+        return reasons
+    notice = "⚠ Probable wrong model: " + object_mismatch.get("message", "")
+    for key in ("geometry_reason", "texture_reason", "color_reason"):
+        existing = reasons.get(key, "") or ""
+        reasons[key] = f"{notice} {existing}".strip()
+    return reasons
 
 
 def _generate_with_groq(
     scores: dict, details: dict, alignment: dict = None,
     confidences: dict = None, material: dict = None,
+    object_mismatch: dict = None,
 ) -> dict:
     """Call Groq API for LLM-based reasoning."""
     from groq import Groq
@@ -95,6 +120,21 @@ def _generate_with_groq(
             + ("- WARNINGS: " + "; ".join(warns) + "\n" if warns else "")
         )
 
+    mismatch_block = ""
+    if object_mismatch and object_mismatch.get("detected"):
+        mismatch_block = (
+            f"\n## OBJECT MISMATCH (overrides everything below)\n"
+            f"- The model's best silhouette IoU was only {object_mismatch.get('alignment_iou')} "
+            f"(threshold {object_mismatch.get('iou_threshold')}). The 3D model very likely "
+            f"depicts a DIFFERENT object than the photo.\n"
+            f"- Every score was scaled down by the object-match factor "
+            f"{object_mismatch.get('match_factor')} (1.0 = full shape match) for this reason.\n"
+            "- For EVERY category, lead by stating the model appears to be the wrong object "
+            "for this image and that the low score is driven by this mismatch, NOT by a fixable "
+            "texture/color/geometry defect. Tell the user to verify they uploaded the correct "
+            "model + image pair.\n"
+        )
+
     guidance = (
         f"\n## IMPORTANT scoring rules ({asset_class} asset)\n"
         "- This is a multi-part PRODUCT/ASSEMBLY mesh. Non-watertightness, large "
@@ -111,7 +151,7 @@ def _generate_with_groq(
     prompt = f"""You are an expert 3D model quality analyst writing for a non-technical user
 (a designer or store owner) who needs to understand WHY their model scored the way it did
 and WHAT to do about it.
-{alignment_block}{conf_block}{material_block}{guidance}
+{mismatch_block}{alignment_block}{conf_block}{material_block}{guidance}
 ## Scores (0-100, higher is better)
 - Geometry: {scores['geometry']}/100
 - Texture: {scores['texture']}/100
@@ -441,18 +481,32 @@ def _generate_template_reasons(
                 "not the texture itself."
             )
     else:
-        # Trusted alignment: per-pixel similarity is meaningful here.
-        ssim = _ssim_phrase(perc.get("ssim_raw"))
+        # Trusted alignment: surface match is judged on FOREGROUND-masked cues
+        # (color distribution + texture/pattern descriptor), which are robust to
+        # small render-vs-photo misalignment. Raw masked SSIM is intentionally a
+        # minor cue (it collapses under sub-pixel shifts) and is NOT quoted as the
+        # verdict, so the text can't contradict a high score.
+        col = perc.get("histogram_similarity")
+        pat = perc.get("texture_pattern_similarity")
+        cues = []
+        if col is not None:
+            cues.append(f"{round(float(col))}% color-distribution match")
+        if pat is not None:
+            cues.append(f"{round(float(pat))}% surface-pattern match")
+        cue_text = " and ".join(cues)
         if t_score >= 80:
             t_reason = "The texturing is high quality"
-            t_reason += f" — {ssim}." if ssim else "."
+            t_reason += f" — {cue_text} over the foreground." if cue_text else "."
             t_reason += f" The model includes {facts}."
+        elif t_score >= 50:
+            t_reason = f"The texture is a reasonable match — the model has {facts}"
+            t_reason += f", with {cue_text}." if cue_text else "."
         else:
             t_reason = f"The model has {facts}"
-            t_reason += f", and {ssim}." if ssim else "."
+            t_reason += f", but only {cue_text}." if cue_text else "."
             t_reason += (
-                " With alignment trustworthy, the remaining per-pixel difference reflects a "
-                "genuine surface/detail gap."
+                " The photographed surface and the model's surface differ in color "
+                "and/or pattern beyond what misalignment explains."
             )
         if t_conf is not None:
             t_reason += f" (Confidence {t_conf}.)"

@@ -132,9 +132,12 @@ def _structural_soundness(quality: dict) -> float:
 
 def _silhouette_factor(iou: float) -> float:
     """
-    Map silhouette IoU to a multiplicative shape-agreement factor in [0.6, 1.0].
+    Map silhouette IoU to a multiplicative shape-agreement factor in [0.0, 1.0].
     A structurally perfect mesh with a moderate (but real) alignment keeps most
-    of its score; only a catastrophic shape mismatch drives it down hard.
+    of its score; a catastrophic shape mismatch drives the factor toward 0 so a
+    structurally healthy mesh that does NOT match the photo can no longer keep a
+    high geometry score (Fix 2 — no 0.6 floor; the floor previously let an
+    unrelated model never drop below 60 regardless of shape disagreement).
     """
     try:
         v = float(iou)
@@ -143,10 +146,10 @@ def _silhouette_factor(iou: float) -> float:
     if v >= 0.85:
         return 1.0
     if v >= 0.5:
-        return 0.9 + (v - 0.5) / 0.35 * 0.1
+        return 0.85 + (v - 0.5) / 0.35 * 0.15   # 0.85 → 1.0
     if v >= 0.3:
-        return 0.8 + (v - 0.3) / 0.2 * 0.1
-    return 0.6 + max(0.0, v) / 0.3 * 0.2
+        return 0.55 + (v - 0.3) / 0.2 * 0.30     # 0.55 → 0.85
+    return max(0.0, v) / 0.3 * 0.55              # 0.0 → 0.55
 
 
 def _integrity_checks(quality: dict) -> dict:

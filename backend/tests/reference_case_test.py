@@ -159,8 +159,10 @@ def check_reference_case(glb_path, geom_source_path, geom_render_path,
     # Fix 4 — confidence reported (albedo path → high color confidence)
     using_albedo = albedo is not None and albedo.size > 0
     color_conf = 0.95 if using_albedo else 0.5
+    # IoU below IOU_TRUST_THRESHOLD (0.5) to exercise the low-IoU histogram
+    # fallback path and assert it is flagged as untrusted.
     texture = validate_texture(color_source_path, color_render_path, glb_path,
-                               alignment={"iou": 0.62})
+                               alignment={"iou": 0.35})
     presence = check_texture_presence(glb_path)
     texture_score = apply_texture_gates(texture["score"], presence)["score"]
     expect("per-score confidence reported",
