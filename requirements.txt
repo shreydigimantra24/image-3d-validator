@@ -6,20 +6,21 @@ python-multipart==0.0.9
 # Image Processing
 Pillow>=10.0.0
 opencv-python-headless>=4.8.0
-numpy>=1.24.0
+# numpy pinned <2: pyrender 0.1.45 forces PyOpenGL==3.1.0, which crashes on
+# glGenTextures (ctypes ArgumentError) under numpy>=2. Stay on numpy 1.x.
+numpy>=1.24.0,<2.0.0
 
 # Background Removal
 transformers>=4.40.0
 torch>=2.0.0
 torchvision>=0.15.0
-kornia>=0.7.0
 
 # Mesh Processing
 trimesh[easy]>=4.0.0
 pyrender>=0.1.45
-# pyrender pins PyOpenGL==3.1.0, which crashes on glGenTextures under numpy>=2
-# (ctypes ArgumentError). 3.1.7+ restores numpy-2 compatibility. Override the pin.
-PyOpenGL>=3.1.7
+# pyrender 0.1.45 hard-pins PyOpenGL==3.1.0; match it to avoid a resolver conflict.
+# numpy is pinned <2 (above) so the 3.1.0 glGenTextures crash does not trigger.
+PyOpenGL==3.1.0
 
 # Metrics
 scikit-image>=0.21.0

@@ -46,7 +46,7 @@ User Upload → Background Removal (RMBG-2.0) → Preprocessed Image
 | Backend         | FastAPI, Uvicorn                  |
 | Frontend        | React (Vite), Google Model Viewer |
 | Background Rem. | RMBG-2.0, HuggingFace Transformers|
-| Mesh Processing | Trimesh, PyRender, Open3D         |
+| Mesh Processing | Trimesh, PyRender, PyOpenGL       |
 | Image Metrics   | OpenCV, scikit-image, LPIPS       |
 | Color Metrics   | NumPy, SciPy, OpenCV (LAB)        |
 | LLM             | Groq API (Llama 3.3 70B)          |
