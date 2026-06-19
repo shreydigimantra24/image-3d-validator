@@ -75,8 +75,9 @@ source venv/bin/activate  # Linux/Mac
 # Install dependencies
 pip install -r requirements.txt
 
-# Set Groq API key (optional)
-export GROQ_API_KEY="your-api-key-here"
+# Set Groq API key (optional) — copy the template and edit
+cp .env.example .env
+# then put your key in .env:  GROQ_API_KEY=your-api-key-here
 
 # Start backend
 cd backend

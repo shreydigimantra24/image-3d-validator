@@ -3,6 +3,12 @@ Image-to-3D Object Validation Pipeline - FastAPI Backend
 """
 
 import os
+from dotenv import load_dotenv, find_dotenv
+
+# Load .env before importing routers/services — several modules read env vars
+# (GROQ_API_KEY, ASSET_CLASS, IoU thresholds) at import time.
+load_dotenv(find_dotenv(usecwd=True))
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
