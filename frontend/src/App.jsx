@@ -2,7 +2,14 @@ import { useState, useRef } from 'react';
 import axios from 'axios';
 import './App.css';
 
-const API_BASE = '/api';
+// Backend origin. Empty by default → relative paths (works with the Vite dev
+// proxy or when frontend + backend share an origin behind one reverse proxy).
+// For a separately-hosted backend, set VITE_BACKEND_URL at build time, e.g.
+//   VITE_BACKEND_URL=https://api.example.com
+const BACKEND_URL = import.meta.env.VITE_BACKEND_URL || '';
+const API_BASE = `${BACKEND_URL}/api`;
+// Prefix backend-served asset paths (/uploads/.., /outputs/..) with the origin.
+const asset = (path) => (path ? `${BACKEND_URL}${path}` : path);
 
 function ScoreRing({ score, label }) {
   const radius = 42;
@@ -421,16 +428,16 @@ function App() {
                 <div className="evidence-grid">
                   <div className="image-preview">
                     <div className="image-preview__label">Source (background removed)</div>
-                    <img src={validationResult.evidence.source_url || bgRemovedUrl} alt="Source" />
+                    <img src={asset(validationResult.evidence.source_url || bgRemovedUrl)} alt="Source" />
                   </div>
                   <div className="image-preview">
                     <div className="image-preview__label">Aligned render</div>
-                    <img src={validationResult.evidence.aligned_render_url || renderedImageUrl} alt="Aligned render" />
+                    <img src={asset(validationResult.evidence.aligned_render_url || renderedImageUrl)} alt="Aligned render" />
                   </div>
                   <div className="image-preview">
                     <div className="image-preview__label">Overlay</div>
                     {validationResult.evidence.overlay_url ? (
-                      <img src={validationResult.evidence.overlay_url} alt="Overlay comparison" />
+                      <img src={asset(validationResult.evidence.overlay_url)} alt="Overlay comparison" />
                     ) : (
                       <div className="evidence-empty">Overlay unavailable</div>
                     )}
