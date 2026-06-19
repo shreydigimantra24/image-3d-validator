@@ -341,7 +341,7 @@ Texture and color evaluation can be influenced by rendering conditions. Material
 
 ---
 
-## 5. Inference Performance (~14s per Asset)
+## 5. Inference Performance (~25s per Asset)
 
 Validation runtime is currently dominated by pose alignment (~8–9 seconds), which relies on a brute-force search across candidate viewpoints.
 
