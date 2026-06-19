@@ -6,6 +6,13 @@ pose estimator can search for the viewpoint that best matches the input image.
 """
 
 import os
+
+# pyrender's default (pyglet) backend needs an X display, which headless
+# servers don't have ("Cannot connect to None"). Force an offscreen GL backend
+# before pyrender/PyOpenGL are imported. Override with PYOPENGL_PLATFORM=osmesa
+# (pure-CPU, no GPU needed) if EGL is unavailable on the host.
+os.environ.setdefault("PYOPENGL_PLATFORM", "egl")
+
 import uuid
 import logging
 import numpy as np
