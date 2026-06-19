@@ -2,6 +2,27 @@
 
 An end-to-end system that validates 3D GLB models against source product images, producing quantitative Geometry, Texture, and Color scores with human-readable explanations.
 
+## Live Demo
+
+**Live URL:** https://image-3d-validator.dmlabs.in/
+
+### How to add examples and test on the live URL
+
+The repo ships ready-to-use example pairs in [`examples/`](examples/):
+
+| Image                  | Model                  |
+|------------------------|------------------------|
+| `examples/image1.png`  | `examples/model1.glb`  |
+| `examples/image2.png`  | `examples/model2.glb`  |
+
+1. Open https://image-3d-validator.dmlabs.in/ in your browser.
+2. **Upload the source image** — pick one of the example PNGs (e.g. `examples/image1.png`). Background removal (RMBG-2.0) runs automatically.
+3. **Upload the matching GLB** — pick the paired model (e.g. `examples/model1.glb`). Use the interactive 3D preview to confirm it loaded.
+4. Click **Validate**. The pipeline runs pose alignment → geometry → texture → color and returns scores with LLM reasons.
+5. Review the **Geometry / Texture / Color** scores, the validation-evidence panel (source / aligned render / overlay), and the per-stage performance breakdown.
+
+> Always pair the matching image + model (`image1`↔`model1`, `image2`↔`model2`) so the silhouette alignment is meaningful. To test mismatch behavior, deliberately cross a pair (e.g. `image1.png` + `model2.glb`) and watch the scores drop.
+
 ## Features
 
 - **Background Removal** — Isolate products using RMBG-2.0 (BriaAI)
