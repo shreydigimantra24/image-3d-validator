@@ -1,7 +1,0 @@
-{
-  "permissions": {
-    "allow": [
-      "Bash(python -c \"import sys; sys.path.insert\\(0,'.'\\); import services.pose_estimator, services.glb_renderer, services.geometry_validator; print\\('OK'\\)\")"
-    ]
-  }
-}
